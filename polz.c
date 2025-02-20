@@ -226,7 +226,7 @@ void polz_bitunpack(polz *r, const uint8_t buf[(N/32*LOGQ+15)/16*64]) {
 
     for(j=0;j<N/32;j++) {
       if(k < bits) {
-        f = _mm512_load_si512((__m512i*)buf);
+        f = _mm512_loadu_si512(buf);
         g = _mm512_slli_epi16(f,k);
         h = _mm512_add_epi16(g,h);
         g = _mm512_and_si512(h,mask);
