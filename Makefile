@@ -24,7 +24,8 @@ all: \
   test_jlproj \
   test_chihuahua \
   test_dachshund \
-  test_greyhound
+  test_greyhound \
+  test_off
 
 %.o: %.c
 	$(CC) $(CFLAGS) $(LOGQFLAG) -c $< -o $@
@@ -53,6 +54,9 @@ test_dachshund: test_dachshund.c $(SOURCES) $(HEADERS)
 test_greyhound: test_greyhound.c $(SOURCES) $(HEADERS)
 	$(CC) $(CFLAGS) $(LOGQFLAG) test_greyhound.c $(SOURCES) -o $@ -lm
 
+test_off: test_off.c $(SOURCES) $(HEADERS)
+	$(CC) $(CFLAGS) $(LOGQFLAG) test_off.c $(SOURCES) -o $@ -lm
+
 libdogs.so: $(SOURCES) $(HEADERS)
 	$(CC) -shared -fPIC -fvisibility=hidden $(CFLAGS) $(LOGQFLAG) -o $@ $(SOURCES)
 
@@ -66,3 +70,4 @@ clean:
 	-$(RM) -rf test_chihuahua
 	-$(RM) -rf test_dachshund
 	-$(RM) -rf test_greyhound
+	-$(RM) -rf test_off
