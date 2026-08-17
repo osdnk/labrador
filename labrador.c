@@ -131,9 +131,14 @@ int init_proof(proof *pi, const witness *wt, int quadratic, int tail) {
 
     /* decomposition in width */
     varz = 0;
-    for(i=0;i<pi->r;i++)
-      varz += normsq[i];
-    varz /= nn*N;
+    vars = 0;
+    for(i=0;i<pi->r;i++) {
+      vars = MAX(vars,(double)normsq[i]/(pi->n[i]*N));
+      if(pi->nu[i]) {
+        varz += pi->nu[i]*vars;
+        vars = 0;
+      }
+    }
     varz *= TAU1+4*TAU2;
     decompose = !tail && !sis_secure(13,6*T*SLACK*sqrt(2*(TAU1+4*TAU2)*varz*nn*N));
     decompose = decompose || 64*varz > (1 << 28);
@@ -520,6 +525,18 @@ double print_witness_pp(const witness *wt) {
   return s;
 }
 
+static void decompose_checked(poly *r, const polx *a, size_t len, size_t f, size_t b, const char *where) {
+  polxvec_decompose(r,a,len,f,b);
+  polx *rec = _aligned_alloc(64,len*sizeof(polx));
+  polxvec_reconstruct(rec,r,len,f,b);
+  polxvec_sub(rec,rec,a,len);
+  if(!polxvec_iszero(rec,len)) {
+    fprintf(stderr,"ERROR in %s: decomposition not exact\n",where);
+    exit(1);
+  }
+  free(rec);
+}
+
 size_t commit_raw(polx *u, poly *t, size_t r, size_t n, const polx s[r][n],
                   size_t off, const comparams *cpp, int tail)
 {
@@ -536,7 +553,7 @@ size_t commit_raw(polx *u, poly *t, size_t r, size_t n, const polx s[r][n],
   for(i=0;i<r;i++) {
     /* inner commitment */
     polxvec_mul_extension(tx,comkey,s[i],n,cpp->kappa,1);
-    polxvec_decompose(&t[i*l],tx,cpp->kappa,cpp->fu,cpp->bu);
+    decompose_checked(&t[i*l],tx,cpp->kappa,cpp->fu,cpp->bu,"commit_raw");
 
     /* outer commitment */
     polxvec_frompolyvec(tx,&t[i*l],l);
@@ -567,7 +584,7 @@ size_t qugarbage_raw(polx *u, poly *g, size_t r, size_t n, const polx s[r][n],
   }
 
   if(!tail) {
-    polxvec_decompose(g,gx,len,cpp->fg,cpp->bg);
+    decompose_checked(g,gx,len,cpp->fg,cpp->bg,"qugarbage_raw");
     polxvec_frompolyvec(gx,g,cpp->fg*len);
     off += polxvec_mul_extension(gx,&comkey[off],gx,cpp->fg*len,cpp->kappa1,1);
     polxvec_add(u,u,gx,cpp->kappa1);
@@ -955,7 +972,7 @@ static void amortize_tail(statement *ost, witness *owt, proof *pi, polx sx[ost->
   }
 
   memcpy(ost->h,hashbuf,16);
-  polxvec_decompose(owt->s[0],sx[0],n,cpp->f,cpp->b);
+  decompose_checked(owt->s[0],sx[0],n,cpp->f,cpp->b,"amortize_tail");
 
   ost->betasq = 0;
   for(i=0;i<cpp->f;i++) {
@@ -999,7 +1016,7 @@ void amortize(statement *ost, witness *owt, proof *pi, polx sx[ost->r][ost->n]) 
       }
     }
   }
-  polxvec_decompose(vh,hx,(r*r+r)/2,cpp->fu,cpp->bu);
+  decompose_checked(vh,hx,(r*r+r)/2,cpp->fu,cpp->bu,"amortize linear garbage");
   polxvec_frompolyvec(hx,vh,m-h);
 
   /* second outer commitment */
@@ -1021,7 +1038,7 @@ void amortize(statement *ost, witness *owt, proof *pi, polx sx[ost->r][ost->n]) 
     polxvec_polx_mul_add(sx[0],&ost->c[i],sx[i],n);
     polxvec_polx_mul_add(phi[0],&ost->c[i],phi[i],n);
   }
-  polxvec_decompose(owt->s[0],sx[0],n,cpp->f,cpp->b);
+  decompose_checked(owt->s[0],sx[0],n,cpp->f,cpp->b,"amortize");
 
   ost->betasq = 0;
   for(i=0;i<cpp->f;i++) {
@@ -1085,6 +1102,7 @@ int reduce_amortize(statement *ost, const proof *pi) {
   ost->cnst->phi = realloc(ost->cnst->phi,n*sizeof(polx));
   return 0;
 }
+
 
 int prove(statement *ost, witness *owt, proof *pi, const statement *ist, const witness *iwt, int tail) {
   int ret;
