@@ -8,6 +8,8 @@
 #include "data40.c"
 #elif LOGQ == 48
 #include "data48.c"
+#elif LOGQ == 50
+#include "data50.c"
 #elif LOGQ == 56
 #include "data56.c"
 #elif LOGQ == 64

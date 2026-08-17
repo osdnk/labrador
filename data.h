@@ -33,6 +33,11 @@
 #define K 8
 #define L 4
 #define NAMESPACE(s) labrador48_##s
+#elif LOGQ == 50
+#define QOFF 2687
+#define K 8
+#define L 4
+#define NAMESPACE(s) labrador50_##s
 #elif LOGQ == 56
 #define QOFF 27
 #define K 9

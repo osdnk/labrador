@@ -467,6 +467,16 @@ static void expand_challenge(int64_t alpha[256], const uint8_t buf[256*QBYTES]) 
     f = _mm512_maskz_permutexvar_epi8(mask,vpermbidx,f);
     _mm512_store_si512((__m512i*)&alpha[8*i],f);
   }
+#elif QBYTES == 7
+  int j;
+
+  (void)f;
+  for(i=0;i<256;i++) {
+    alpha[i] = 0;
+    for(j=0;j<7;j++)
+      alpha[i] |= (int64_t)buf[7*i+j] << 8*j;
+    alpha[i] &= ((int64_t)1 << LOGQ) - 1;
+  }
 #else
 #error
 #endif

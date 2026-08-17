@@ -41,7 +41,7 @@ qoffs = [
       3,   91,   27,  115,  299,    3,   35,   19,
      99,  355,  131,  451,  243,  123,  107,   19,
     195,   75,   11,   67,  539,  139,  635,  115,
-     59,  123,   27,  139,  395,  315,  131,   67,
+     59,  123, 2687,  139,  395,  315,  131,   67,
      27,  195,   27,   99,  107,  259,  171,  259,
      59,  115,  203,   19,   83,   19,   35,  411,
     107,  475,   35,  427,  123,   43,   11,   67,
@@ -85,12 +85,16 @@ def bitrev6(a):
 
 q = 2**logq - qoffs[logq]
 nlimbs = math.ceil(logq/14)
+
+selection = sorted(primes, key=lambda pr: -pr[0]) if logq == 50 else primes
+
 P = 1
 nprimes = 0
-for prime in primes:
+for prime in selection:
   P *= prime[0]
   nprimes += 1
   if P > 128*q**2: break # FIXME: Map to [0,P-1] in CRT
+assert P > 128*q**2
 
 print("#include <stdint.h>")
 print("#include \"data.h\"")
@@ -106,7 +110,7 @@ print()
 print("__attribute__((aligned(64)))")
 print("const pdata primes[%d] = {"%nprimes)
 
-for prime in primes[:nprimes]:
+for prime in selection[:nprimes]:
   p = prime[0]
   zeta = prime[1]
   pinv = centermod(pow(p,-1,2**16),2**16)
@@ -267,7 +271,7 @@ for i in range(math.ceil(nlimbs/8)):
   print()
 print("  }},")
 print("  .xvec = {")
-for prime in primes[:nprimes]:
+for prime in selection[:nprimes]:
   p = prime[0]
   #x = centermod(P//p,q)
   x = P//p%q

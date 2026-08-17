@@ -176,8 +176,8 @@ void polzvec_uniform(polz *r, size_t len, const uint8_t seed[16], uint64_t nonce
   }
 }
 
-// Assumes LOGQ is a multiple of 8
 void polz_bitpack(uint8_t r[N*QBYTES], const polz *a) {
+#if LOGQ % 8 == 0
   size_t i,j,k,bits;
   __m512i f,g,h;
 
@@ -197,6 +197,19 @@ void polz_bitpack(uint8_t r[N*QBYTES], const polz *a) {
       k = (k + bits) & 0xF;
     }
   }
+#else
+  size_t i,j;
+  uint64_t v;
+
+  for(i=0;i<N;i++) {
+    v = 0;
+    for(j=0;j<L;j++)
+      v |= (uint64_t)(uint16_t)a->limbs[j].c[i] << 14*j;
+    v &= ((uint64_t)1 << LOGQ) - 1;
+    for(j=0;j<QBYTES;j++)
+      r[i*QBYTES+j] = v >> 8*j;
+  }
+#endif
 }
 
 void polzvec_bitpack(uint8_t *r, const polz *a, size_t len) {
@@ -207,6 +220,7 @@ void polzvec_bitpack(uint8_t *r, const polz *a, size_t len) {
 }
 
 void polz_bitunpack(polz *r, const uint8_t buf[(N/32*LOGQ+15)/16*64]) {
+#if LOGQ % 8 == 0
   int i,j,k,bits;
   __m512i f,g,h,mask;
   const __m512i mask14 = _mm512_set1_epi16(0x3FFF);
@@ -241,6 +255,22 @@ void polz_bitunpack(polz *r, const uint8_t buf[(N/32*LOGQ+15)/16*64]) {
       k = (k - bits) & 0xF;
     }
   }
+#else
+  size_t i,j;
+  uint64_t v;
+
+  for(i=0;i<N;i++) {
+    v = 0;
+    for(j=0;j<QBYTES;j++)
+      v |= (uint64_t)buf[i*QBYTES+j] << 8*j;
+    v &= ((uint64_t)1 << LOGQ) - 1;
+    for(j=0;j<L-1;j++) {
+      r->limbs[j].c[i] = v & 0x3FFF;
+      v >>= 14;
+    }
+    r->limbs[L-1].c[i] = v;
+  }
+#endif
 }
 
 void polzvec_almostuniform(polz *r, size_t len, const uint8_t seed[16], uint64_t nonce) {
@@ -251,29 +281,29 @@ void polzvec_almostuniform(polz *r, size_t len, const uint8_t seed[16], uint64_t
 
 #if LOGQ%4 == 0
   chunk = (4*4096/AES128CTR_BLOCKBYTES+LOGQ-1)/LOGQ*2*AES128CTR_BLOCKBYTES/N;
-#elif
-  chunk = (4096/AES128CTR_BLOCKBYTES+LOGQ-1)/LOGQ*8*AES128CTR_BLOCKBYTES/N;
+#else
+  chunk = 2*AES128CTR_BLOCKBYTES/N;
 #endif
 
-  nblocks = chunk*N/AES128CTR_BLOCKBYTES*LOGQ/8;
+  nblocks = chunk*N/AES128CTR_BLOCKBYTES*QBYTES;
   aes128ctr_init(&aesctx,seed,nonce);
 
   while(len >= chunk) {
-    buf = (uint8_t*)r + chunk*(2*N*L - N*LOGQ/8);
+    buf = (uint8_t*)r + chunk*(2*N*L - N*QBYTES);
     aes128ctr_squeezeblocks(buf,nblocks,&aesctx);
     for(i=0;i<chunk;i++)
-      polz_bitunpack(&r[i],&buf[i*N*LOGQ/8]);
+      polz_bitunpack(&r[i],&buf[i*N*QBYTES]);
     len -= chunk;
     r += chunk;
   }
 
   if(len) {
-    nblocks = (len*N*LOGQ/8+AES128CTR_BLOCKBYTES-1)/AES128CTR_BLOCKBYTES;
+    nblocks = (len*N*QBYTES+AES128CTR_BLOCKBYTES-1)/AES128CTR_BLOCKBYTES;
     __attribute__((aligned(64)))
     uint8_t buf2[nblocks*AES128CTR_BLOCKBYTES];
     aes128ctr_squeezeblocks(buf2,nblocks,&aesctx);
     for(i=0;i<len;i++)
-      polz_bitunpack(&r[i],&buf2[i*N*LOGQ/8]);
+      polz_bitunpack(&r[i],&buf2[i*N*QBYTES]);
   }
 }
 
