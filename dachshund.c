@@ -290,7 +290,7 @@ static void simple_commit(statement *ost, witness *owt, proof *pi, commitment *c
   t = ceil(log2(iwt->normsq[i])/b);
 */
 
-static void reduce_simple_commit(statement *ost, const proof *pi, const commitment *com) {
+static void reduce_simple_commit(statement *ost, const proof *pi, const commitment *com, const smplstmnt *ist) {
   __attribute__((aligned(16)))
   uint8_t hashbuf[16+MAX(pi->cpp->u1len,com->kappa1)*N*QBYTES];
 
@@ -299,7 +299,7 @@ static void reduce_simple_commit(statement *ost, const proof *pi, const commitme
   memcpy(hashbuf,ost->h,16);
   polzvec_bitpack(&hashbuf[16],com->u,com->kappa1);
   shake128(hashbuf,32,hashbuf,16+com->kappa1*N*QBYTES);
-  //FIXME: check alpha
+  polxvec_challenge(com->alpha,ist->r+1,&hashbuf[16],0);
   polzvec_bitpack(&hashbuf[16],pi->u1,pi->cpp->u1len);
   shake128(ost->h,16,hashbuf,16+pi->cpp->u1len*N*QBYTES);
 }
@@ -509,7 +509,7 @@ int simple_reduce(statement *ost, const proof *pi, const commitment *com, const 
   const size_t s1 = pi->nu[ist->r];
   jlmat = _aligned_alloc(64,s1*ost->n*256*N/8);
 
-  reduce_simple_commit(ost,pi,com);
+  reduce_simple_commit(ost,pi,com,ist);
   ret = reduce_project(ost,jlmat,pi,ist->r+1,betasq);
   if(ret) goto err;  // projection too long
 
