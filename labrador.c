@@ -184,6 +184,7 @@ int init_proof(proof *pi, const witness *wt, int quadratic, int tail) {
       varg *= 2*N;
       cpp->fg = ceil((log2(12)+log2(varg))/(2*cpp->b));
       cpp->fg = MAX(1,cpp->fg);
+      cpp->fg = MAX(cpp->fg,(LOGQ+cpp->bg-1)/cpp->bg);
     }
 
     /* commitment ranks */
