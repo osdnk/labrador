@@ -60,8 +60,24 @@ test_off: test_off.c $(SOURCES) $(HEADERS)
 libdogs.so: $(SOURCES) $(HEADERS)
 	$(CC) -shared -fPIC -fvisibility=hidden $(CFLAGS) $(LOGQFLAG) -o $@ $(SOURCES)
 
+LIBCFLAGS = $(filter-out -flto=auto,$(CFLAGS))
+LIBOBJECTS = $(addprefix libobj/,$(patsubst %.c,%.o,$(patsubst %.S,%.o,$(SOURCES))))
+
+libobj:
+	mkdir -p libobj
+
+libobj/%.o: %.c $(HEADERS) | libobj
+	$(CC) $(LIBCFLAGS) $(LOGQFLAG) -c $< -o $@
+
+libobj/%.o: %.S | libobj
+	$(CC) $(LIBCFLAGS) $(LOGQFLAG) -c $< -o $@
+
+liblabrador.a: $(LIBOBJECTS)
+	ar rcs $@ $^
+
 clean:
 	-$(RM) -rf *.o *.so
+	-$(RM) -rf libobj liblabrador.a
 	-$(RM) -rf test_aesctr
 	-$(RM) -rf test_ntt
 	-$(RM) -rf test_poly
