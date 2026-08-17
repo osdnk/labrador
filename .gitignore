@@ -7,3 +7,7 @@ test_jlproj
 test_chihuahua
 test_dachshund
 test_greyhound
+test_off
+*.o
+*.a
+libobj/
