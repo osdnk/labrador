@@ -870,7 +870,10 @@ size_t polyvec_collaps_add_extension(poly *c, const poly *a, const poly *b, size
 
   /* shortcut */
   if(deg == 1) {
-    polyvec_poly_pointwise_add(c,a,b,len,stride,prime);
+    for(i=0;i<len;i++) {
+      poly_pointwise_add(&c[stride*i],a,&b[stride*i],prime);
+      poly_reduce(&c[stride*i],prime);
+    }
     return len;
   }
 
