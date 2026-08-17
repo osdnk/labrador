@@ -49,7 +49,7 @@ int polyvec_isbinary(const poly *r, size_t len) {
   polyvec_flip(t,r,len);
   ret |= polyvec_sprodz(t,r,len);
 
-  ret = -ret >> 63;
+  ret = (ret >> 63) + 1;
   return ret;
 }
 
