@@ -763,12 +763,22 @@ void collaps_jlproj(constraint *cnst, statement *st, const proof *pi, const uint
   collaps_jlproj_raw(cnst,st->r,st->n,st->h,pi->p,jlmat);
 }
 
-void lift_aggregate_zqcnst(statement *ost, proof *pi, size_t i, constraint *cnst, const polx sx[ost->r][ost->n]) {
+void lift_aggregate_zqcnst(statement *ost, proof *pi, size_t i, constraint *cnst, const polx sx[ost->r][ost->n],
+                           const zqdefer *df)
+{
   __attribute__((aligned(16)))
   uint8_t hashbuf[16+N*QBYTES];
+  size_t c;
   polx alpha[1];
 
   polxvec_sprod(cnst->b,cnst->phi,*sx,ost->r*ost->n);
+  /* The degree-0 phi is not in cnst->phi any more; its share of <phi,s> is the same
+   * <phi_c,s> in every round, scaled by this round's scalar. */
+  if(df) {
+    for(c=0;c<df->k0;c++)
+      polx_scale_add(cnst->b,&df->u[c],df->s[c]);
+    polx_refresh(cnst->b);
+  }
   polz_frompolx(&pi->bb[i],cnst->b);
   polz_setcoeff_fromint64(&pi->bb[i],0,0);
   memcpy(hashbuf,ost->h,16);
@@ -776,6 +786,9 @@ void lift_aggregate_zqcnst(statement *ost, proof *pi, size_t i, constraint *cnst
   shake128(hashbuf,32,hashbuf,sizeof(hashbuf));
   memcpy(ost->h,hashbuf,16);
   polxvec_quarternary(alpha,1,&hashbuf[16],0);
+  if(df)
+    for(c=0;c<df->k0;c++)
+      polx_scale_add(&df->t[c],alpha,df->s[c]);
   if(!i) {
     polxvec_polx_mul(ost->cnst->phi,alpha,cnst->phi,ost->r*ost->n);
     polx_mul(ost->cnst->b,alpha,cnst->b);
@@ -788,9 +801,12 @@ void lift_aggregate_zqcnst(statement *ost, proof *pi, size_t i, constraint *cnst
   }
 }
 
-void reduce_lift_aggregate_zqcnst(statement *ost, const proof *pi, size_t i, const constraint *cnst) {
+void reduce_lift_aggregate_zqcnst(statement *ost, const proof *pi, size_t i, const constraint *cnst,
+                                  const zqdefer *df)
+{
   __attribute__((aligned(16)))
   uint8_t hashbuf[16+N*QBYTES];
+  size_t c;
   polz b[1];
   polx alpha[1];
   zz c0[1];
@@ -806,6 +822,9 @@ void reduce_lift_aggregate_zqcnst(statement *ost, const proof *pi, size_t i, con
   shake128(hashbuf,32,hashbuf,sizeof(hashbuf));
   memcpy(ost->h,hashbuf,16);
   polxvec_quarternary(alpha,1,&hashbuf[16],0);
+  if(df)
+    for(c=0;c<df->k0;c++)
+      polx_scale_add(&df->t[c],alpha,df->s[c]);
   if(!i) {
     polxvec_polx_mul(ost->cnst->phi,alpha,cnst->phi,ost->r*ost->n);
     polx_mul(ost->cnst->b,alpha,cnst->b);
@@ -1149,7 +1168,7 @@ int prove(statement *ost, witness *owt, proof *pi, const statement *ist, const w
     init_constraint_raw(cnst,ost->r,ost->n,1,0);
     for(i=0;i<LIFTS;i++) {
       collaps_jlproj(cnst,ost,pi,jlmat);
-      lift_aggregate_zqcnst(ost,pi,i,cnst,sx);
+      lift_aggregate_zqcnst(ost,pi,i,cnst,sx,NULL);
     }
     free_constraint(cnst);
 
@@ -1188,7 +1207,7 @@ int reduce(statement *ost, const proof *pi, const statement *ist) {
 
   for(i=0;i<LIFTS;i++) {
     collaps_jlproj(cnst,ost,pi,jlmat);
-    reduce_lift_aggregate_zqcnst(ost,pi,i,cnst);
+    reduce_lift_aggregate_zqcnst(ost,pi,i,cnst,NULL);
   }
   free_constraint(cnst);
   free(jlmat);

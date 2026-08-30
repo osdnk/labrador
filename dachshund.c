@@ -432,6 +432,8 @@ int simple_prove(statement *ost, witness *owt, proof *pi, commitment *com,
   witness ewt[1];
   constraint cnst[1] = {};
   void *buf = NULL;
+  int64_t *zqs = NULL;
+  polx *zqbuf = NULL;
 
   ret = expand_witness(ewt,ist,iwt);
   if(ret)
@@ -451,8 +453,8 @@ int simple_prove(statement *ost, witness *owt, proof *pi, commitment *com,
     buf = _aligned_alloc(64,ost->r*ost->n*sizeof(polx)+s1*ost->n*256*N/8);
     polx (*sx)[ost->n] = (polx(*)[ost->n])buf;
     uint8_t (*jlmat)[ost->n][256*N/8] = (uint8_t(*)[ost->n][256*N/8])sx[ost->r];
-    simple_commit(ost,owt,pi,com,sx,ist,ewt);
-    ret = project(ost,pi,jlmat,ewt);
+simple_commit(ost,owt,pi,com,sx,ist,ewt);
+ret = project(ost,pi,jlmat,ewt);
     if(ret) {
       ret += 20;
       goto err;
@@ -462,18 +464,29 @@ int simple_prove(statement *ost, witness *owt, proof *pi, commitment *com,
     free(ewt->n);
 
     init_constraint_raw(cnst,ost->r,ost->n,1,0);
+    const size_t k0 = sparsecnst_zqcount(ist->cnst,ist->k);
+    zqs = _malloc(MAX(k0,1)*sizeof(int64_t));
+    zqbuf = _aligned_alloc(64,2*MAX(k0,1)*sizeof(polx));
+    zqdefer df = {k0,zqs,&zqbuf[k0],zqbuf};
+    polxvec_setzero(zqbuf,2*MAX(k0,1));
+collaps_sparsecnst_eval(&zqbuf[k0],ost,pi,ist->cnst,ist->k,*sx);
     for(i=0;i<LIFTS;i++) {
-      collaps_jlproj_raw(cnst,s1,ost->n,ost->h,pi->p,jlmat);
+collaps_jlproj_raw(cnst,s1,ost->n,ost->h,pi->p,jlmat);
       polxvec_setzero(&cnst->phi[s1*ost->n],(ost->r-s1)*ost->n);
-      collaps_sparsecnst(cnst,ost,pi,ist->cnst,ist->k);
+collaps_sparsecnst_scalars(cnst,ost,ist->cnst,ist->k,zqs);
       simple_collaps(cnst,ost,pi,com,ist);
-      lift_aggregate_zqcnst(ost,pi,i,cnst,sx);
+      lift_aggregate_zqcnst(ost,pi,i,cnst,sx,&df);
     }
+collaps_sparsecnst_apply(ost,pi,ist->cnst,ist->k,zqbuf);
+    free(zqbuf);
+    free(zqs);
+    zqbuf = NULL;
+    zqs = NULL;
     free_constraint(cnst);
 
-    simple_aggregate(ost,pi,com,ist);
+simple_aggregate(ost,pi,com,ist);
     aggregate_sparsecnst(ost,pi,ist->cnst,ist->k);
-    amortize(ost,owt,pi,sx);
+amortize(ost,owt,pi,sx);
     free(buf);
     buf = NULL;
   }
@@ -483,6 +496,8 @@ int simple_prove(statement *ost, witness *owt, proof *pi, commitment *com,
   return 0;
 
 err:
+  free(zqbuf);
+  free(zqs);
   if(ewt->n) {
     free(ewt->s[ewt->r-1]);
     free(ewt->n);
@@ -502,6 +517,8 @@ int simple_reduce(statement *ost, const proof *pi, const commitment *com, const 
   uint64_t betasq = 0;
   uint8_t (*jlmat)[ost->n][256*N/8];
   constraint cnst[1] = {};
+  int64_t *zqs = NULL;
+  polx *zqbuf = NULL;
 
   init_statement(ost,pi,ist->h);
   for(i=0;i<ist->r;i++) {
@@ -514,25 +531,35 @@ int simple_reduce(statement *ost, const proof *pi, const commitment *com, const 
   const size_t s1 = pi->nu[ist->r];
   jlmat = _aligned_alloc(64,s1*ost->n*256*N/8);
 
-  reduce_simple_commit(ost,pi,com,ist);
-  ret = reduce_project(ost,jlmat,pi,ist->r+1,betasq);
+reduce_simple_commit(ost,pi,com,ist);
+ret = reduce_project(ost,jlmat,pi,ist->r+1,betasq);
   if(ret) goto err;  // projection too long
 
   init_constraint(cnst,ost);
+  const size_t k0 = sparsecnst_zqcount(ist->cnst,ist->k);
+  zqs = _malloc(MAX(k0,1)*sizeof(int64_t));
+  zqbuf = _aligned_alloc(64,MAX(k0,1)*sizeof(polx));
+  zqdefer df = {k0,zqs,NULL,zqbuf};
+  polxvec_setzero(zqbuf,MAX(k0,1));
   for(i=0;i<LIFTS;i++) {
-    collaps_jlproj_raw(cnst,s1,ost->n,ost->h,pi->p,jlmat);
+collaps_jlproj_raw(cnst,s1,ost->n,ost->h,pi->p,jlmat);
     polxvec_setzero(&cnst->phi[s1*ost->n],(ost->r-s1)*ost->n);
-    collaps_sparsecnst(cnst,ost,pi,ist->cnst,ist->k);
+collaps_sparsecnst_scalars(cnst,ost,ist->cnst,ist->k,zqs);
     simple_collaps(cnst,ost,pi,com,ist);
-    reduce_lift_aggregate_zqcnst(ost,pi,i,cnst);
+    reduce_lift_aggregate_zqcnst(ost,pi,i,cnst,&df);
   }
+collaps_sparsecnst_apply(ost,pi,ist->cnst,ist->k,zqbuf);
+  free(zqbuf);
+  free(zqs);
+  zqbuf = NULL;
+  zqs = NULL;
   free_constraint(cnst);
   free(jlmat);
   jlmat = NULL;
 
-  simple_aggregate(ost,pi,com,ist);
+simple_aggregate(ost,pi,com,ist);
   aggregate_sparsecnst(ost,pi,ist->cnst,ist->k);
-  ret = reduce_amortize(ost,pi);
+ret = reduce_amortize(ost,pi);
   if(ret) {  // commitments not secure (1/2)
     ret += 10;
     goto err;
@@ -543,6 +570,8 @@ int simple_reduce(statement *ost, const proof *pi, const commitment *com, const 
   return 0;
 
 err:
+  free(zqbuf);
+  free(zqs);
   free_statement(ost);
   free(jlmat);
   free_constraint(cnst);

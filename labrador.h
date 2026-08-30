@@ -112,8 +112,20 @@ int reduce_project(statement *ost, uint8_t jlmat[][ost->n][256*N/8], const proof
 void collaps_jlproj_raw(constraint *cnst, size_t r, size_t n, uint8_t h[16], const int32_t p[256],
                        const uint8_t jlmat[r][n][256*N/8]);
 void collaps_jlproj(constraint *cnst, statement *st, const proof *pi, const uint8_t jlmat[st->r][st->n][256*N/8]);
-void lift_aggregate_zqcnst(statement *ost, proof *pi, size_t i, constraint *cnst, const polx sx[ost->r][ost->n]);
-void reduce_lift_aggregate_zqcnst(statement *ost, const proof *pi, size_t i, const constraint *cnst);
+/* The degree-0 collapse, deferred across the LIFTS rounds: k0 constraints, this round's
+ * scalar challenges s, the prover's precomputed <phi_c, s> in u (NULL for the verifier),
+ * and t, which collects sum_i s_c^(i) alpha_i for the single phi pass afterwards. */
+typedef struct {
+  size_t k0;
+  const int64_t *s;
+  const polx *u;
+  polx *t;
+} zqdefer;
+
+void lift_aggregate_zqcnst(statement *ost, proof *pi, size_t i, constraint *cnst, const polx sx[ost->r][ost->n],
+                           const zqdefer *df);
+void reduce_lift_aggregate_zqcnst(statement *ost, const proof *pi, size_t i, const constraint *cnst,
+                                  const zqdefer *df);
 
 void amortize(statement *ost, witness *owt, proof *pi, polx sx[ost->r][ost->n]);
 int reduce_amortize(statement *ost, const proof *pi);

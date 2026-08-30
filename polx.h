@@ -12,6 +12,7 @@ void polx_print(const polx *a);
 void polx_getcoeff(zz *r, const polx *a, int k);
 void polxvec_setzero(polx *r, size_t len);
 void polxvec_fromint64vec(polx *r, size_t len, size_t deg, const int64_t a[len*deg*N]);
+void polxvec_fromint32vec(polx *r, size_t len, const int32_t a[len*N]);
 int polx_iszero(const polx *a);
 int polxvec_iszero(const polx *a, size_t len);
 int polx_iszero_constcoeff(const polx *a);
