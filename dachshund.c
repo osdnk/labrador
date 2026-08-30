@@ -156,7 +156,7 @@ static int expand_witness(witness *ewt, const smplstmnt *ist, const witness *iwt
     normsq += ewt->normsq[i];
   }
 
-  buf = _aligned_alloc(64,k*sizeof(poly));
+  buf = _aligned_alloc(64,MAX(k,1)*sizeof(poly));
   ewt->s[r] = (poly*)buf;
   k = 0;
   for(i=0;i<r;i++) {
@@ -165,6 +165,8 @@ static int expand_witness(witness *ewt, const smplstmnt *ist, const witness *iwt
 
     poly_binary_fromuint64(&ewt->s[r][k++],ist->betasq[i] - ewt->normsq[i]);
   }
+  if(!k)  // all vectors binary; init_proof can not handle a rank 0 vector
+    poly_binary_fromuint64(&ewt->s[r][k++],0);
 
   ewt->n[r] = k;
   ewt->normsq[r] = polyvec_sprodz(ewt->s[r],ewt->s[r],k);
@@ -244,9 +246,10 @@ static void simple_commit(statement *ost, witness *owt, proof *pi, commitment *c
     k += n[i];
   }
 
-  polxvec_frompolyvec(&sx[s0][k],ewt->s[r-1],n[r-1]);
-  polxvec_flip(&sx[s2][k],&sx[s0][k],n[r-1]);
-  polxvec_sprod(&sx[s1][r-1],&sx[s0][k],&sx[s2][k],n[r-1]);
+  const size_t kslack = k;
+  polxvec_frompolyvec(&sx[s0][kslack],ewt->s[r-1],n[r-1]);
+  polxvec_flip(&sx[s2][kslack],&sx[s0][kslack],n[r-1]);
+  polxvec_sprod(&sx[s1][r-1],&sx[s0][kslack],&sx[s2][kslack],n[r-1]);
 
   for(i=0;i<r;i++) {
     if(i < r-1 && ist->betasq[i])
@@ -257,6 +260,7 @@ static void simple_commit(statement *ost, witness *owt, proof *pi, commitment *c
     polz_decompose_topolx(&sx[s1][i],tmp,r,FL,BL);
   }
 
+  k = kslack + n[r-1];
   polxvec_setzero(&sx[s0][k],(s1-s0)*ost->n - k);
   polxvec_setzero(&sx[s1][FL*r],(s2-s1)*ost->n - FL*r);
   polxvec_setzero(&sx[s2][k],(s3-s2)*ost->n - k);
@@ -501,9 +505,10 @@ int simple_reduce(statement *ost, const proof *pi, const commitment *com, const 
 
   init_statement(ost,pi,ist->h);
   for(i=0;i<ist->r;i++) {
-    betasq += ist->betasq[i];
     if(ist->betasq[i])
-      betasq += LOGQ-1;
+      betasq += ist->betasq[i] + LOGQ-1;  // vector plus its binary norm slack
+    else
+      betasq += ist->n[i]*N;  // binary vector
   }
 
   const size_t s1 = pi->nu[ist->r];
