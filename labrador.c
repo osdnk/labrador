@@ -532,8 +532,11 @@ double print_witness_pp(const witness *wt) {
   return s;
 }
 
+/* Reconstructing every decomposition and comparing costs ~4% of the prover, so
+ * the self-check is opt-in; build with -DCHECK_DECOMPOSE to get it back. */
 static void decompose_checked(poly *r, const polx *a, size_t len, size_t f, size_t b, const char *where) {
   polxvec_decompose(r,a,len,f,b);
+#ifdef CHECK_DECOMPOSE
   polx *rec = _aligned_alloc(64,len*sizeof(polx));
   polxvec_reconstruct(rec,r,len,f,b);
   polxvec_sub(rec,rec,a,len);
@@ -542,6 +545,9 @@ static void decompose_checked(poly *r, const polx *a, size_t len, size_t f, size
     exit(1);
   }
   free(rec);
+#else
+  (void)where;
+#endif
 }
 
 size_t commit_raw(polx *u, poly *t, size_t r, size_t n, const polx s[r][n],
@@ -585,9 +591,12 @@ size_t qugarbage_raw(polx *u, poly *g, size_t r, size_t n, const polx s[r][n],
   polxvec_setzero(gx,len);
   for(l=0;l<n;l++) {
     k = 0;
-    for(i=0;i<r;i++)
-      for(j=i;j<r;j++)
-        polx_mul_add(&gx[k++],&s[i][l],&s[j][l]);
+    for(i=0;i<r;i++) {
+      /* gx[k+t] += s[i][l]*s[i+t][l]: one multiplier, consecutive destinations. */
+      for(j=0;j<K;j++)
+        polyvec_poly_pointwise_add_reduce2(&gx[k].vec[j],K,&s[i][l].vec[j],&s[i][l].vec[j],n*K,r-i,&primes[j]);
+      k += r-i;
+    }
   }
 
   if(!tail) {
@@ -1016,11 +1025,13 @@ void amortize(statement *ost, witness *owt, proof *pi, polx sx[ost->r][ost->n]) 
   for(l=0;l<n;l++) {
     k = 0;
     for(i=0;i<r;i++) {
-      polx_mul_add(&hx[k++],&phi[i][l],&sx[i][l]);
-      for(j=i+1;j<r;j++) {
-        polx_mul_add(&hx[k],&phi[i][l],&sx[j][l]);
-        polx_mul_add(&hx[k++],&phi[j][l],&sx[i][l]);
+      /* hx[k+t] += phi[i][l]*sx[i+t][l] + phi[i+t][l]*sx[i][l]: two multipliers,
+       * consecutive destinations. */
+      for(j=0;j<K;j++) {
+        polyvec_poly_pointwise_add_reduce2(&hx[k].vec[j],K,&phi[i][l].vec[j],&sx[i][l].vec[j],n*K,r-i,&primes[j]);
+        polyvec_poly_pointwise_add_reduce2(&hx[k+1].vec[j],K,&sx[i][l].vec[j],&phi[i+1][l].vec[j],n*K,r-i-1,&primes[j]);
       }
+      k += r-i;
     }
   }
   decompose_checked(vh,hx,(r*r+r)/2,cpp->fu,cpp->bu,"amortize linear garbage");

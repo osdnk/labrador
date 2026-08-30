@@ -574,13 +574,11 @@ int simple_verify(const smplstmnt *st, const witness *wt) {
   }
 
   *sx = NULL;
-  for(i=0;i<st->k;i++) {
-    ret = !sparsecnst_check(&st->cnst[i],sx,wt);
-    if(ret) {
-      fprintf(stderr,"ERROR in simple_verify(): Sparse dot-product constraint %zu does not hold\n",i);
-      ret = 10+i;
-      goto end;
-    }
+  i = sparsecnst_check_batch(st->cnst,st->k,sx,wt);
+  if(i < st->k) {
+    fprintf(stderr,"ERROR in simple_verify(): Sparse dot-product constraint %zu does not hold\n",i);
+    ret = 10+i;
+    goto end;
   }
 
 end:

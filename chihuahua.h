@@ -40,6 +40,7 @@ int set_sparsecnst_raw(sparsecnst *cnst, uint8_t h[16], size_t nz, const size_t 
 void free_sparsecnst(sparsecnst *cnst);
 void sparsecnst_eval(polx *b, const sparsecnst *cnst, polx *sx[], const witness *wt);
 int sparsecnst_check(const sparsecnst *cnst, polx *sx[], const witness *wt);
+size_t sparsecnst_check_batch(const sparsecnst *cnst, size_t k, polx *sx[], const witness *wt);
 int init_prncplstmnt_raw(prncplstmnt *st, size_t r, const size_t n[r],
                          uint64_t betasq, size_t k, int quadratic);
 int set_prncplstmnt_lincnst_raw(prncplstmnt *st, size_t i, size_t nz, const size_t idx[nz],

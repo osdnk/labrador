@@ -26,7 +26,6 @@ static int composite_prove(composite *p, statement *tst, witness *twt, double *t
   int ret;
   size_t i = 0;
   double pisize;
-
   while(p->l < 16) {
     p->pi[p->l] = _malloc(sizeof(proof));
     ret = prove(&tst[i^1],&twt[i^1],p->pi[p->l],&tst[i],&twt[i],0);

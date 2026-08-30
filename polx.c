@@ -197,23 +197,33 @@ void polxvec_neg(polx *r, const polx *a, size_t len) {
 }
 
 void polx_add(polx *r, const polx *a, const polx *b) {
-  polyvec_add(&r->vec[0],&a->vec[0],&b->vec[0],K);
-  polx_reduce(r);
+  size_t i;
+
+  for(i=0;i<K;i++)
+    poly_add_reduce(&r->vec[i],&a->vec[i],&b->vec[i],&primes[i]);
 }
 
 void polxvec_add(polx *r, const polx *a, const polx *b, size_t len) {
-  polyvec_add(&r->vec[0],&a->vec[0],&b->vec[0],K*len);
-  polxvec_reduce(r,len);
+  size_t i,j;
+
+  for(i=0;i<len;i++)
+    for(j=0;j<K;j++)
+      poly_add_reduce(&r[i].vec[j],&a[i].vec[j],&b[i].vec[j],&primes[j]);
 }
 
 void polx_sub(polx *r,const polx *a,const polx *b) {
-  polyvec_sub(&r->vec[0],&a->vec[0],&b->vec[0],K);
-  polx_reduce(r);
+  size_t i;
+
+  for(i=0;i<K;i++)
+    poly_sub_reduce(&r->vec[i],&a->vec[i],&b->vec[i],&primes[i]);
 }
 
 void polxvec_sub(polx *r, const polx *a, const polx *b, size_t len) {
-  polyvec_sub(&r->vec[0],&a->vec[0],&b->vec[0],K*len);
-  polxvec_reduce(r,len);
+  size_t i,j;
+
+  for(i=0;i<len;i++)
+    for(j=0;j<K;j++)
+      poly_sub_reduce(&r[i].vec[j],&a[i].vec[j],&b[i].vec[j],&primes[j]);
 }
 
 void polx_ntt(polx *r, const polx *a) {
@@ -276,9 +286,7 @@ void polx_mul_add(polx *r, const polx *a, const polx *b) {
   size_t i;
 
   for(i=0;i<K;i++)
-    poly_pointwise_add(&r->vec[i],&a->vec[i],&b->vec[i],&primes[i]);
-
-  polx_reduce(r);
+    poly_pointwise_add_reduce(&r->vec[i],&a->vec[i],&b->vec[i],&primes[i]);
 }
 
 void polxvec_mul_add(polx *r, const polx *a, const polx *b, size_t len) {
@@ -291,24 +299,37 @@ void polxvec_mul_add(polx *r, const polx *a, const polx *b, size_t len) {
 }
 
 void polxvec_polx_mul_add(polx *r, const polx *a, const polx *b, size_t len) {
-  size_t i;
+  /* Blocked so that the source and destination slices of one chunk stay in L1
+   * across the K per-prime passes. */
+  const size_t chunk = 16;
+  size_t i,j,l;
 
-  for(i=0;i<K;i++)
-    polyvec_poly_pointwise_add(&r->vec[i],&a->vec[i],&b->vec[i],len,K,&primes[i]);
-
-  polxvec_reduce(r,len);
+  for(i=0;i<len;i+=chunk) {
+    l = MIN(chunk,len-i);
+    for(j=0;j<K;j++)
+      polyvec_poly_pointwise_add_reduce(&r[i].vec[j],&a->vec[j],&b[i].vec[j],l,K,&primes[j]);
+  }
 }
 
 void polxvec_sprod(polx *r, const polx *a, const polx *b, size_t len) {
-  size_t i;
+  /* Blocked so that both operand slices of one chunk stay in L1 across the K
+   * per-prime passes. */
+  const size_t chunk = 64;
+  size_t i,j,l;
 
   if(len == 0) {
     polxvec_setzero(r,1);
     return;
   }
 
-  for(i=0;i<K;i++)
-    polyvec_sprod_pointwise(&r->vec[i],&a->vec[i],&b->vec[i],len,K,&primes[i]);
+  l = MIN(chunk,len);
+  for(j=0;j<K;j++)
+    polyvec_sprod_pointwise(&r->vec[j],&a->vec[j],&b->vec[j],l,K,&primes[j]);
+  for(i=chunk;i<len;i+=chunk) {
+    l = MIN(chunk,len-i);
+    for(j=0;j<K;j++)
+      polyvec_sprod_pointwise_add(&r->vec[j],&a[i].vec[j],&b[i].vec[j],l,K,&primes[j]);
+  }
 }
 
 void polxvec_sprod_add(polx *r, const polx *a, const polx *b, size_t len) {
@@ -365,17 +386,24 @@ void polx_scale_add(polx *r, const polx *a, int64_t s) {
 }
 
 void polxvec_scale_add(polx *r, const polx *a, size_t len, int64_t s) {
-  size_t i;
+  const size_t chunk = 16;
+  size_t i,j,l;
 
   s = cmodq(s);
-  for(i=0;i<K;i++)
-    polyvec_scale_add(&r->vec[i],&a->vec[i],len,K,((s % primes[i].p) << 16) % primes[i].p,&primes[i]);
-
-  polxvec_reduce(r,len);
+  for(i=0;i<len;i+=chunk) {
+    l = MIN(chunk,len-i);
+    for(j=0;j<K;j++)
+      polyvec_scale_add_reduce(&r[i].vec[j],&a[i].vec[j],l,K,((s % primes[j].p) << 16) % primes[j].p,&primes[j]);
+  }
 }
 
 size_t polxvec_mul_extension(polx *c, const polx *a, const polx *b, size_t len, size_t deg, size_t mult) {
   size_t i,j,k = 0;
+
+  if(deg == 1 && mult == 1) {
+    polxvec_sprod(c,a,b,len);
+    return len;
+  }
 
   for(i=0;i<mult;i++)
     for(j=0;j<K;j++)
@@ -386,6 +414,11 @@ size_t polxvec_mul_extension(polx *c, const polx *a, const polx *b, size_t len, 
 
 size_t polxvec_collaps_add_extension(polx *c, const polx *a, const polx *b, size_t len, size_t deg, size_t mult) {
   size_t i,j,k = 0;
+
+  if(deg == 1 && mult == 1) {
+    polxvec_polx_mul_add(c,a,b,len);
+    return len;
+  }
 
   for(i=0;i<mult;i++)
     for(j=0;j<K;j++)

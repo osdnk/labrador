@@ -717,6 +717,72 @@ void poly_pointwise_add(poly *r, const poly *a, const poly *b, const pdata *prim
   poly_add(r,r,&t);
 }
 
+/* r += a*b, Barrett-reduced. Bit-identical to poly_pointwise_add() + poly_reduce(). */
+void poly_pointwise_add_reduce(poly *r, const poly *a, const poly *b, const pdata *prime) {
+  size_t i;
+  __m512i f,g,h;
+  const __m512i p = _mm512_set1_epi16(prime->p);
+  const __m512i pinv = _mm512_set1_epi16(prime->pinv);
+  const __m512i v = _mm512_set1_epi16(prime->v);
+  const __m512i shift = _mm512_set1_epi16(1 << (16+15-27));
+
+  for(i=0;i<N/32;i++) {
+    f = _mm512_load_si512(&a->vec->v[i]);
+    g = _mm512_load_si512(&b->vec->v[i]);
+    h = _mm512_mullo_epi16(f,g);
+    f = _mm512_mulhi_epi16(f,g);
+    g = _mm512_mullo_epi16(h,pinv);
+    g = _mm512_mulhi_epi16(g,p);
+    f = _mm512_sub_epi16(f,g);
+    f = _mm512_add_epi16(f,_mm512_load_si512(&r->vec->v[i]));
+    g = _mm512_mulhi_epi16(f,v);
+    g = _mm512_mulhrs_epi16(g,shift);
+    g = _mm512_mullo_epi16(g,p);
+    f = _mm512_sub_epi16(f,g);
+    _mm512_store_si512(&r->vec->v[i],f);
+  }
+}
+
+/* r = a+b, Barrett-reduced. */
+void poly_add_reduce(poly *r, const poly *a, const poly *b, const pdata *prime) {
+  size_t i;
+  __m512i f,g;
+  const __m512i p = _mm512_set1_epi16(prime->p);
+  const __m512i v = _mm512_set1_epi16(prime->v);
+  const __m512i shift = _mm512_set1_epi16(1 << (16+15-27));
+
+  for(i=0;i<N/32;i++) {
+    f = _mm512_load_si512(&a->vec->v[i]);
+    g = _mm512_load_si512(&b->vec->v[i]);
+    f = _mm512_add_epi16(f,g);
+    g = _mm512_mulhi_epi16(f,v);
+    g = _mm512_mulhrs_epi16(g,shift);
+    g = _mm512_mullo_epi16(g,p);
+    f = _mm512_sub_epi16(f,g);
+    _mm512_store_si512(&r->vec->v[i],f);
+  }
+}
+
+/* r = a-b, Barrett-reduced. */
+void poly_sub_reduce(poly *r, const poly *a, const poly *b, const pdata *prime) {
+  size_t i;
+  __m512i f,g;
+  const __m512i p = _mm512_set1_epi16(prime->p);
+  const __m512i v = _mm512_set1_epi16(prime->v);
+  const __m512i shift = _mm512_set1_epi16(1 << (16+15-27));
+
+  for(i=0;i<N/32;i++) {
+    f = _mm512_load_si512(&a->vec->v[i]);
+    g = _mm512_load_si512(&b->vec->v[i]);
+    f = _mm512_sub_epi16(f,g);
+    g = _mm512_mulhi_epi16(f,v);
+    g = _mm512_mulhrs_epi16(g,shift);
+    g = _mm512_mullo_epi16(g,p);
+    f = _mm512_sub_epi16(f,g);
+    _mm512_store_si512(&r->vec->v[i],f);
+  }
+}
+
 void polyvec_pointwise_add(poly *r, const poly *a, const poly *b, size_t len, size_t stride, const pdata *prime) {
   size_t i;
 
@@ -730,6 +796,75 @@ void polyvec_poly_pointwise_add(poly *r, const poly *a, const poly *b, size_t le
 
   for(i=0;i<len;i++)
     poly_pointwise_add(&r[stride*i],a,&b[stride*i],prime);
+}
+
+/* r[i] += a*b[i], Barrett-reduced, with the multiplier hoisted out of the loop.
+ * Bit-identical to poly_pointwise_add() followed by poly_reduce(). */
+void polyvec_poly_pointwise_add_reduce(poly *r, const poly *a, const poly *b, size_t len, size_t stride,
+                                       const pdata *prime)
+{
+  size_t i,j;
+  __m512i f,g;
+  __m512i al[N/32], ah[N/32];
+  const __m512i p = _mm512_set1_epi16(prime->p);
+  const __m512i pinv = _mm512_set1_epi16(prime->pinv);
+  const __m512i v = _mm512_set1_epi16(prime->v);
+  const __m512i shift = _mm512_set1_epi16(1 << (16+15-27));
+
+  for(i=0;i<N/32;i++) {
+    ah[i] = _mm512_load_si512(&a->vec->v[i]);
+    al[i] = _mm512_mullo_epi16(ah[i],pinv);
+  }
+
+  for(i=0;i<len;i++) {
+    for(j=0;j<N/32;j++) {
+      f = _mm512_load_si512(&b[stride*i].vec->v[j]);
+      g = _mm512_mullo_epi16(f,al[j]);
+      f = _mm512_mulhi_epi16(f,ah[j]);
+      g = _mm512_mulhi_epi16(g,p);
+      f = _mm512_sub_epi16(f,g);
+      f = _mm512_add_epi16(f,_mm512_load_si512(&r[stride*i].vec->v[j]));
+      g = _mm512_mulhi_epi16(f,v);
+      g = _mm512_mulhrs_epi16(g,shift);
+      g = _mm512_mullo_epi16(g,p);
+      f = _mm512_sub_epi16(f,g);
+      _mm512_store_si512(&r[stride*i].vec->v[j],f);
+    }
+  }
+}
+
+/* r[rstride*i] += a*b[bstride*i], Barrett-reduced. */
+void polyvec_poly_pointwise_add_reduce2(poly *r, size_t rstride, const poly *a, const poly *b, size_t bstride,
+                                        size_t len, const pdata *prime)
+{
+  size_t i,j;
+  __m512i f,g;
+  __m512i al[N/32], ah[N/32];
+  const __m512i p = _mm512_set1_epi16(prime->p);
+  const __m512i pinv = _mm512_set1_epi16(prime->pinv);
+  const __m512i v = _mm512_set1_epi16(prime->v);
+  const __m512i shift = _mm512_set1_epi16(1 << (16+15-27));
+
+  for(i=0;i<N/32;i++) {
+    ah[i] = _mm512_load_si512(&a->vec->v[i]);
+    al[i] = _mm512_mullo_epi16(ah[i],pinv);
+  }
+
+  for(i=0;i<len;i++) {
+    for(j=0;j<N/32;j++) {
+      f = _mm512_load_si512(&b[bstride*i].vec->v[j]);
+      g = _mm512_mullo_epi16(f,al[j]);
+      f = _mm512_mulhi_epi16(f,ah[j]);
+      g = _mm512_mulhi_epi16(g,p);
+      f = _mm512_sub_epi16(f,g);
+      f = _mm512_add_epi16(f,_mm512_load_si512(&r[rstride*i].vec->v[j]));
+      g = _mm512_mulhi_epi16(f,v);
+      g = _mm512_mulhrs_epi16(g,shift);
+      g = _mm512_mullo_epi16(g,p);
+      f = _mm512_sub_epi16(f,g);
+      _mm512_store_si512(&r[rstride*i].vec->v[j],f);
+    }
+  }
 }
 
 void polyvec_sprod_pointwise(poly *r, const poly *a, const poly *b, size_t len, size_t stride, const pdata *prime) {
@@ -806,10 +941,9 @@ static size_t bitrev(size_t k, size_t n) {
 size_t polyvec_pointwise_extension(poly *c, const poly *a, const poly *b, size_t len, size_t stride, size_t deg,
                                    const pdata *prime)
 {
-  size_t i,j,k;
+  size_t i,k;
   size_t deg2;
-  const int extrared = (prime->p & 0x2000) ? 1 : 0;
-  poly tu[deg], tl[deg], tmp[stride*deg];
+  poly tu[deg], tl[deg];
 
   /* shortcut */
   if(deg == 1) {
@@ -824,24 +958,11 @@ size_t polyvec_pointwise_extension(poly *c, const poly *a, const poly *b, size_t
   k = 0;
   while(len) {
     for(i=0;i<MIN(deg,len);i++) {  // columns
-      polyvec_poly_pointwise(&tmp[stride*0],&b[stride*i],&a[stride*(deg2-i)],i,stride,prime);
-      polyvec_poly_pointwise(&tmp[stride*i],&b[stride*i],&a[stride*0],deg-i,stride,prime);
-      for(j=0;j<i;j++)
-        poly_add(&tu[j],&tu[j],&tmp[stride*j]);
-      for(j=i;j<deg;j++)
-        poly_add(&tl[j],&tl[j],&tmp[stride*j]);
-      if(1 || extrared || i%2) { // FIXME
-        polyvec_reduce(&tu[0],i,1,prime);
-        polyvec_reduce(&tl[i],deg-i,1,prime);
-      }
+      polyvec_poly_pointwise_add_reduce2(&tu[0],1,&b[stride*i],&a[stride*(deg2-i)],stride,i,prime);
+      polyvec_poly_pointwise_add_reduce2(&tl[i],1,&b[stride*i],&a[stride*0],stride,deg-i,prime);
     }
-    for(i=deg;i<MIN(deg2,len);i++) {
-      polyvec_poly_pointwise(&tmp[stride*0],&b[stride*i],&a[stride*(deg2-i)],deg,stride,prime);
-      for(j=0;j<deg;j++)
-        poly_add(&tu[j],&tu[j],&tmp[stride*j]);
-      if(1 || extrared || i%2) // FIXME
-        polyvec_reduce(&tu[0],deg,1,prime);
-    }
+    for(i=deg;i<MIN(deg2,len);i++)
+      polyvec_poly_pointwise_add_reduce2(&tu[0],1,&b[stride*i],&a[stride*(deg2-i)],stride,deg,prime);
 
     a += stride*deg2;
     b += stride*deg2;
@@ -870,10 +991,7 @@ size_t polyvec_collaps_add_extension(poly *c, const poly *a, const poly *b, size
 
   /* shortcut */
   if(deg == 1) {
-    for(i=0;i<len;i++) {
-      poly_pointwise_add(&c[stride*i],a,&b[stride*i],prime);
-      poly_reduce(&c[stride*i],prime);
-    }
+    polyvec_poly_pointwise_add_reduce(c,a,b,len,stride,prime);
     return len;
   }
 
@@ -943,6 +1061,34 @@ void polyvec_scale_add(poly *r, const poly *a, size_t len, size_t stride, int16_
 
   for(i=0;i<len;i++)
     poly_scale_add(&r[stride*i],&a[stride*i],s,prime);
+}
+
+/* r[i] += s*a[i], Barrett-reduced. Bit-identical to poly_scale_add() followed by
+ * poly_reduce(), with the reduction fused into the same pass. */
+void polyvec_scale_add_reduce(poly *r, const poly *a, size_t len, size_t stride, int16_t s, const pdata *prime) {
+  size_t i,j;
+  __m512i f,g;
+  const __m512i sl = _mm512_set1_epi16(s*prime->pinv);
+  const __m512i sh = _mm512_set1_epi16(s);
+  const __m512i p = _mm512_set1_epi16(prime->p);
+  const __m512i v = _mm512_set1_epi16(prime->v);
+  const __m512i shift = _mm512_set1_epi16(1 << (16+15-27));
+
+  for(i=0;i<len;i++) {
+    for(j=0;j<N/32;j++) {
+      f = _mm512_load_si512(&a[stride*i].vec->v[j]);
+      g = _mm512_mullo_epi16(f,sl);
+      f = _mm512_mulhi_epi16(f,sh);
+      g = _mm512_mulhi_epi16(g,p);
+      f = _mm512_sub_epi16(f,g);
+      f = _mm512_add_epi16(f,_mm512_load_si512(&r[stride*i].vec->v[j]));
+      g = _mm512_mulhi_epi16(f,v);
+      g = _mm512_mulhrs_epi16(g,shift);
+      g = _mm512_mullo_epi16(g,p);
+      f = _mm512_sub_epi16(f,g);
+      _mm512_store_si512(&r[stride*i].vec->v[j],f);
+    }
+  }
 }
 
 static const double complex czetas[N/2] = {

@@ -207,6 +207,108 @@ int sparsecnst_check(const sparsecnst *cnst, polx *sx[], const witness *wt) {
   return ret;
 }
 
+/* One (phi buffer, witness slice) block of one constraint, ready to be evaluated
+ * in an order of our choosing. */
+typedef struct {
+  const polx *phi;
+  const polx *s;
+  polx *acc;
+  size_t len;
+  size_t deg2;
+  size_t mult;
+} blockent;
+
+static int blockent_cmp(const void *x, const void *y) {
+  const polx *const a = ((const blockent*)x)->phi;
+  const polx *const b = ((const blockent*)y)->phi;
+  return (a > b) - (a < b);
+}
+
+/* Checks every constraint at once. Constraints alias each other's phi buffers, so
+ * the blocks are evaluated phi-major: each distinct buffer is streamed once
+ * instead of once per referencing constraint. Returns k if all hold, else the
+ * index of the first that does not. */
+size_t sparsecnst_check_batch(const sparsecnst *cnst, size_t k, polx *sx[], const witness *wt) {
+  const size_t r = wt->r;
+  const size_t *n = wt->n;
+
+  size_t i,j,u,v,ne,tot,ret;
+  polx *acc;
+  blockent *ent;
+
+  if(!*sx) {
+    u = 0;
+    for(i=0;i<r;i++)
+      u += n[i];
+    sx[0] = _aligned_alloc(64,u*sizeof(polx));
+    for(i=1;i<r;i++)
+      sx[i] = &sx[i-1][n[i-1]];
+    for(i=0;i<r;i++)
+      polxvec_frompolyvec(sx[i],wt->s[i],n[i]);
+  }
+
+  tot = 0;
+  ne = 0;
+  for(i=0;i<k;i++) {
+    tot += MAX(1,cnst[i].deg);
+    ne += cnst[i].nz;
+  }
+  acc = _aligned_alloc(64,MAX(tot,1)*sizeof(polx));
+  polxvec_setzero(acc,tot);
+  ent = _malloc(MAX(ne,1)*sizeof(blockent));
+
+  ne = 0;
+  tot = 0;
+  for(i=0;i<k;i++) {
+    const size_t deg2 = MAX(1,cnst[i].deg);
+    for(j=0;j<cnst[i].nz;j++) {
+      ent[ne].phi = cnst[i].phi[j];
+      ent[ne].s = &sx[cnst[i].idx[j]][cnst[i].off[j]];
+      ent[ne].acc = &acc[tot];
+      ent[ne].len = cnst[i].len[j];
+      ent[ne].deg2 = deg2;
+      ent[ne].mult = cnst[i].mult[j];
+      ne += 1;
+    }
+    tot += deg2;
+  }
+
+  qsort(ent,ne,sizeof(blockent),blockent_cmp);
+  for(i=0;i<ne;i++) {
+    polx t[ent[i].deg2];
+    polxvec_mul_extension(t,ent[i].phi,ent[i].s,ent[i].len,ent[i].deg2/ent[i].mult,ent[i].mult);
+    polxvec_add(ent[i].acc,ent[i].acc,t,ent[i].deg2);
+  }
+
+  ret = k;
+  tot = 0;
+  for(i=0;i<k;i++) {
+    const size_t deg2 = MAX(1,cnst[i].deg);
+    polx *b = &acc[tot];
+    polx t[deg2];
+    tot += deg2;
+
+    for(j=0;j<cnst[i].a->len;j++) {
+      u = cnst[i].a->rows[j];
+      v = cnst[i].a->cols[j];
+      polxvec_sprod(t,sx[u],sx[v],MIN(n[u],n[v]));
+      polx_mul(t,t,&cnst[i].a->coeffs[j]);
+      polx_add(b,b,t);
+    }
+    if(cnst[i].b)
+      polxvec_sub(b,b,cnst[i].b,deg2);
+
+    if(!(cnst[i].deg ? polxvec_iszero(b,deg2) : polx_iszero_constcoeff(b))) {
+      ret = i;
+      break;
+    }
+  }
+
+  free(ent);
+  free(acc);
+  return ret;
+}
+
 int init_prncplstmnt_raw(prncplstmnt *st, size_t r, const size_t n[r],
                          uint64_t betasq, size_t k, int quadratic)
 {
@@ -298,16 +400,35 @@ void print_prncplstmnt_pp(const prncplstmnt *st) {
   printf("\n");
 }
 
+#define AGGCHUNK 16
+
+/* A destination run written by a constant-term constraint. */
+typedef struct {
+  polx *p;
+  size_t len;
+} phirun;
+
+static int phirun_cmp(const void *x, const void *y) {
+  polx *const a = ((const phirun*)x)->p;
+  polx *const b = ((const phirun*)y)->p;
+  return (a > b) - (a < b);
+}
+
 void collaps_sparsecnst(constraint *ocnst, statement *ost, const proof *pi, const sparsecnst *icnst, size_t k) {
-  size_t i,j,m,u,v;
+  size_t i,j,m,u,v,nc,nb;
   const size_t n = ost->n;
   int64_t s;
   polx (*phi)[n];
+  polx **dbase;
+  phirun *cov;
 
   m = 0;
+  nb = 0;
   for(i=0;i<k;i++)
-    if(icnst[i].deg == 0)
+    if(icnst[i].deg == 0) {
       m += 1;
+      nb += icnst[i].nz;
+    }
 
   __attribute__((aligned(16)))
   uint8_t hashbuf[16+m*QBYTES];
@@ -315,6 +436,23 @@ void collaps_sparsecnst(constraint *ocnst, statement *ost, const proof *pi, cons
   shake128(hashbuf,sizeof(hashbuf),ost->h,16);
   memcpy(ost->h,hashbuf,16);
 
+  /* Destination base of every witness index, walked once instead of once per block. */
+  u = 0;
+  for(i=0;i<k;i++)
+    if(icnst[i].deg == 0)
+      for(j=0;j<icnst[i].nz;j++)
+        if(icnst[i].idx[j] > u) u = icnst[i].idx[j];
+  dbase = _malloc((u+1)*sizeof(polx*));
+  cov = _malloc(MAX(nb,1)*sizeof(phirun));
+  phi = (polx(*)[n])ocnst->phi;
+  v = 0;
+  for(i=0;i<=u;i++) {
+    dbase[i] = &(*phi)[v];
+    phi += pi->nu[i];
+    v = (pi->nu[i]) ? 0 : v + pi->n[i];
+  }
+
+  nb = 0;
   m = 0;  // deg 0 constraints get consecutive challenges
   for(i=0;i<k;i++) {
     if(icnst[i].deg) continue;
@@ -329,14 +467,11 @@ void collaps_sparsecnst(constraint *ocnst, statement *ost, const proof *pi, cons
       polx_scale_add(ocnst->b,icnst[i].b,s);
 
     for(j=0;j<icnst[i].nz;j++) {
-      phi = (polx(*)[n])ocnst->phi;
-      u = v = 0;
-      while(u < icnst[i].idx[j]) {
-        phi += pi->nu[u];
-        v = (pi->nu[u]) ? 0 : v + pi->n[u];
-        u += 1;
-      }
-      polxvec_scale_add(&(*phi)[v+icnst[i].off[j]],icnst[i].phi[j],icnst[i].len[j],s);
+      polx *dst = dbase[icnst[i].idx[j]] + icnst[i].off[j];
+      polxvec_scale_add(dst,icnst[i].phi[j],icnst[i].len[j],s);
+      cov[nb].p = dst;
+      cov[nb].len = icnst[i].len[j];
+      nb += 1;
     }
 
     sparsemat_scale_add(ocnst->a,icnst[i].a,s);
@@ -346,42 +481,124 @@ void collaps_sparsecnst(constraint *ocnst, statement *ost, const proof *pi, cons
    * They are multiplied by the aggregation challenge, accumulated over LIFTS and
    * finally multiplied by the witness in amortize(), which overflows the product
    * of the polx primes and silently corrupts the value mod q. Reduce mod q here,
-   * where the growth happens; prover and verifier both call this. */
-  if(m)
-    polxvec_refresh(ocnst->phi,ost->r*n);
+   * where the growth happens; prover and verifier both call this. Only the runs
+   * that were scaled grew; the rest of phi is what jlproj_collapsmat left there,
+   * already reduced, so the merged coverage is enough. */
+  qsort(cov,nb,sizeof(phirun),phirun_cmp);
+  for(i=0;i<nb;) {
+    polx *lo = cov[i].p;
+    polx *hi = lo + cov[i].len;
+    for(j=i+1;j<nb && cov[j].p <= hi;j++)
+      if(cov[j].p + cov[j].len > hi) hi = cov[j].p + cov[j].len;
+    nc = hi - lo;
+    polxvec_refresh(lo,nc);
+    i = j;
+  }
+
+  free(cov);
+  free(dbase);
+}
+
+/* One (destination, phi buffer, challenge) contribution to the aggregated phi. */
+typedef struct {
+  polx *dst;
+  const polx *src;
+  const polx *alpha;
+  size_t len;
+} aggent;
+
+static int aggent_cmp(const void *x, const void *y) {
+  const polx *const a = ((const aggent*)x)->src;
+  const polx *const b = ((const aggent*)y)->src;
+  return (a > b) - (a < b);
 }
 
 void aggregate_sparsecnst(statement *ost, const proof *pi, const sparsecnst *cnst, size_t k) {
-  size_t i,j,u,v;
+  size_t i,j,u,v,ne,degtot,maxidx;
   __attribute__((aligned(16)))
   uint8_t hashbuf[32];
   polx (*phi)[ost->n];
+  polx **dbase;
+  polx *alphabuf;
+  aggent *ent;
 
   shake128(hashbuf,32,ost->h,16);
   memcpy(ost->h,hashbuf,16);
 
+  /* Destination base of every witness index, walked once instead of once per block. */
+  maxidx = 0;
+  degtot = 0;
+  ne = 0;
+  for(i=0;i<k;i++) {
+    if(!cnst[i].deg) continue;
+    degtot += cnst[i].deg;
+    ne += cnst[i].nz;
+    for(j=0;j<cnst[i].nz;j++)
+      if(cnst[i].idx[j] > maxidx) maxidx = cnst[i].idx[j];
+  }
+  dbase = _malloc((maxidx+1)*sizeof(polx*));
+  phi = (polx(*)[ost->n])ost->cnst->phi;
+  v = 0;
+  for(u=0;u<=maxidx;u++) {
+    dbase[u] = &(*phi)[v];
+    phi += pi->nu[u];
+    v = (pi->nu[u]) ? 0 : v + pi->n[u];
+  }
+
+  alphabuf = _aligned_alloc(64,MAX(degtot,1)*sizeof(polx));
+  ent = _malloc(MAX(ne,1)*sizeof(aggent));
+
+  /* The challenges, b and a are consumed in the original order; only the phi
+   * accumulation is deferred and regrouped. */
+  ne = 0;
+  degtot = 0;
   for(i=0;i<k;i++) {
     if(cnst[i].deg == 0) continue;
-    polx alpha[cnst[i].deg];
+    polx *alpha = &alphabuf[degtot];
+    degtot += cnst[i].deg;
     polxvec_quarternary(alpha,cnst[i].deg,&hashbuf[16],i);  // nonce is the global index
 
     if(cnst[i].b)
       polxvec_sprod_add(ost->cnst->b,alpha,cnst[i].b,cnst[i].deg);
 
     for(j=0;j<cnst[i].nz;j++) {
-      phi = (polx(*)[ost->n])ost->cnst->phi;
-      u = v = 0;
-      while(u < cnst[i].idx[j]) {
-        phi += pi->nu[u];
-        v = (pi->nu[u]) ? 0 : v + pi->n[u];
-        u += 1;
+      polx *dst = dbase[cnst[i].idx[j]] + cnst[i].off[j];
+      if(cnst[i].deg == 1 && cnst[i].mult[j] == 1) {
+        ent[ne].dst = dst;
+        ent[ne].src = cnst[i].phi[j];
+        ent[ne].alpha = alpha;
+        ent[ne].len = cnst[i].len[j];
+        ne += 1;
       }
-      polxvec_collaps_add_extension(&(*phi)[v+cnst[i].off[j]],alpha,cnst[i].phi[j],cnst[i].len[j],
-                                    cnst[i].deg/cnst[i].mult[j],cnst[i].mult[j]);
+      else
+        polxvec_collaps_add_extension(dst,alpha,cnst[i].phi[j],cnst[i].len[j],
+                                      cnst[i].deg/cnst[i].mult[j],cnst[i].mult[j]);
     }
 
     sparsemat_polx_mul_add(ost->cnst->a,alpha,cnst[i].a);
   }
+
+  /* Constraints alias each other's phi buffers but write few distinct destination
+   * runs; visiting the contributions destination-major keeps the accumulator hot
+   * instead of streaming it once per constraint. */
+  qsort(ent,ne,sizeof(aggent),aggent_cmp);
+  for(i=0;i<ne;) {
+    size_t e,off,maxlen = ent[i].len;
+    for(j=i+1;j<ne && ent[j].src == ent[i].src;j++)
+      if(ent[j].len > maxlen) maxlen = ent[j].len;
+    /* Tiled so the destination slice stays in L1 while every contribution to it
+     * is streamed in. */
+    for(off=0;off<maxlen;off+=AGGCHUNK)
+      for(e=i;e<j;e++)
+        if(off < ent[e].len)
+          polxvec_polx_mul_add(ent[e].dst+off,ent[e].alpha,ent[e].src+off,
+                               MIN(AGGCHUNK,ent[e].len-off));
+    i = j;
+  }
+
+  free(ent);
+  free(alphabuf);
+  free(dbase);
 
   ost->cnst->a->coeffs = realloc(ost->cnst->a->coeffs,ost->cnst->a->len*sizeof(polx));
 }
