@@ -26,7 +26,8 @@ all: \
   test_dachshund \
   test_greyhound \
   test_off \
-  test_binary
+  test_binary \
+  test_mixed
 
 %.o: %.c
 	$(CC) $(CFLAGS) $(LOGQFLAG) -c $< -o $@
@@ -61,6 +62,9 @@ test_off: test_off.c $(SOURCES) $(HEADERS)
 test_binary: test_binary.c $(SOURCES) $(HEADERS)
 	$(CC) $(CFLAGS) $(LOGQFLAG) test_binary.c $(SOURCES) -o $@ -lm
 
+test_mixed: test_mixed.c $(SOURCES) $(HEADERS)
+	$(CC) $(CFLAGS) $(LOGQFLAG) test_mixed.c $(SOURCES) -o $@ -lm
+
 libdogs.so: $(SOURCES) $(HEADERS)
 	$(CC) -shared -fPIC -fvisibility=hidden $(CFLAGS) $(LOGQFLAG) -o $@ $(SOURCES)
 
@@ -92,3 +96,4 @@ clean:
 	-$(RM) -rf test_greyhound
 	-$(RM) -rf test_off
 	-$(RM) -rf test_binary
+	-$(RM) -rf test_mixed

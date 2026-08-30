@@ -299,47 +299,56 @@ void print_prncplstmnt_pp(const prncplstmnt *st) {
 }
 
 void collaps_sparsecnst(constraint *ocnst, statement *ost, const proof *pi, const sparsecnst *icnst, size_t k) {
-  size_t i,j,u,v;
+  size_t i,j,m,u,v;
   const size_t n = ost->n;
   int64_t s;
   polx (*phi)[n];
 
-  j = 0;
+  m = 0;
   for(i=0;i<k;i++)
     if(icnst[i].deg == 0)
-      j += 1;
+      m += 1;
 
   __attribute__((aligned(16)))
-  uint8_t hashbuf[16+j*QBYTES];
+  uint8_t hashbuf[16+m*QBYTES];
 
   shake128(hashbuf,sizeof(hashbuf),ost->h,16);
   memcpy(ost->h,hashbuf,16);
 
+  m = 0;  // deg 0 constraints get consecutive challenges
   for(i=0;i<k;i++) {
-    if(icnst->deg) continue;
+    if(icnst[i].deg) continue;
 
     s = 0;
     for(j=0;j<QBYTES;j++)
-      s |= (int64_t)hashbuf[16+i*QBYTES+j] << 8*j;
+      s |= (int64_t)hashbuf[16+m*QBYTES+j] << 8*j;
     s &= ((int64_t)1 << LOGQ) - 1;
+    m += 1;
 
-    if(icnst->b)
-      polx_scale_add(ocnst->b,icnst->b,s);
+    if(icnst[i].b)
+      polx_scale_add(ocnst->b,icnst[i].b,s);
 
-    for(j=0;j<icnst->nz;j++) {
+    for(j=0;j<icnst[i].nz;j++) {
       phi = (polx(*)[n])ocnst->phi;
       u = v = 0;
-      while(u < icnst->idx[j]) {
+      while(u < icnst[i].idx[j]) {
         phi += pi->nu[u];
         v = (pi->nu[u]) ? 0 : v + pi->n[u];
         u += 1;
       }
-      polxvec_scale_add(&(*phi)[v+icnst->off[j]],icnst->phi[j],icnst->len[j],s);
+      polxvec_scale_add(&(*phi)[v+icnst[i].off[j]],icnst[i].phi[j],icnst[i].len[j],s);
     }
 
-    sparsemat_scale_add(ocnst->a,icnst->a,s);
-    icnst += 1;
+    sparsemat_scale_add(ocnst->a,icnst[i].a,s);
   }
+
+  /* Scaling by a full width challenge blows the CRT representatives up to ~q^2.
+   * They are multiplied by the aggregation challenge, accumulated over LIFTS and
+   * finally multiplied by the witness in amortize(), which overflows the product
+   * of the polx primes and silently corrupts the value mod q. Reduce mod q here,
+   * where the growth happens; prover and verifier both call this. */
+  if(m)
+    polxvec_refresh(ocnst->phi,ost->r*n);
 }
 
 void aggregate_sparsecnst(statement *ost, const proof *pi, const sparsecnst *cnst, size_t k) {
@@ -352,27 +361,26 @@ void aggregate_sparsecnst(statement *ost, const proof *pi, const sparsecnst *cns
   memcpy(ost->h,hashbuf,16);
 
   for(i=0;i<k;i++) {
-    if(cnst->deg == 0) continue;
-    polx alpha[cnst->deg];
-    polxvec_quarternary(alpha,cnst->deg,&hashbuf[16],i);
+    if(cnst[i].deg == 0) continue;
+    polx alpha[cnst[i].deg];
+    polxvec_quarternary(alpha,cnst[i].deg,&hashbuf[16],i);  // nonce is the global index
 
-    if(cnst->b)
-      polxvec_sprod_add(ost->cnst->b,alpha,cnst->b,cnst->deg);
+    if(cnst[i].b)
+      polxvec_sprod_add(ost->cnst->b,alpha,cnst[i].b,cnst[i].deg);
 
-    for(j=0;j<cnst->nz;j++) {
+    for(j=0;j<cnst[i].nz;j++) {
       phi = (polx(*)[ost->n])ost->cnst->phi;
       u = v = 0;
-      while(u < cnst->idx[j]) {
+      while(u < cnst[i].idx[j]) {
         phi += pi->nu[u];
         v = (pi->nu[u]) ? 0 : v + pi->n[u];
         u += 1;
       }
-      polxvec_collaps_add_extension(&(*phi)[v+cnst->off[j]],alpha,cnst->phi[j],cnst->len[j],
-                                    cnst->deg/cnst->mult[j],cnst->mult[j]);
+      polxvec_collaps_add_extension(&(*phi)[v+cnst[i].off[j]],alpha,cnst[i].phi[j],cnst[i].len[j],
+                                    cnst[i].deg/cnst[i].mult[j],cnst[i].mult[j]);
     }
 
-    sparsemat_polx_mul_add(ost->cnst->a,alpha,cnst->a);
-    cnst += 1;
+    sparsemat_polx_mul_add(ost->cnst->a,alpha,cnst[i].a);
   }
 
   ost->cnst->a->coeffs = realloc(ost->cnst->a->coeffs,ost->cnst->a->len*sizeof(polx));

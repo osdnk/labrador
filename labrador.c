@@ -151,10 +151,17 @@ int init_proof(proof *pi, const witness *wt, int quadratic, int tail) {
       cpp->b = round((log2(12)+log2(varz))/2);
     }
 
+    if(cpp->b > DIGITBITS) {  // digits must stay representable
+      t = cpp->f*cpp->b;
+      cpp->f = (t+DIGITBITS-1)/DIGITBITS;
+      cpp->b = (t+cpp->f-1)/cpp->f;
+    }
+
     /* uniform decomposition */
     if(!tail) {
       cpp->fu = (LOGQ+2*cpp->b/3)/cpp->b;
-      cpp->bu = (LOGQ+cpp->fu/2)/cpp->fu;
+      cpp->fu = MAX(cpp->fu,(LOGQ+DIGITBITS-1)/DIGITBITS);
+      cpp->bu = (LOGQ+cpp->fu-1)/cpp->fu;  // ceil: the digits must cover the modulus
     }
     else {
       cpp->fu = 1;

@@ -9,6 +9,7 @@ test_dachshund
 test_greyhound
 test_off
 test_binary
+test_mixed
 *.o
 *.a
 libobj/

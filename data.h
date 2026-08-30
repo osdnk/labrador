@@ -8,6 +8,7 @@
 #define QBYTES ((LOGQ+7)/8)
 #define LOGDELTA log2(1.00444)
 #define LIFTS ((128+LOGQ-1)/LOGQ)
+#define DIGITBITS 14  // widest digit polz_decompose/polz_reconstruct handle (14 bit limbs, int16 lanes)
 #define TAU1 32
 #define TAU2 8
 #define T 14  // challenge operator norm

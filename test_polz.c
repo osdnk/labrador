@@ -252,6 +252,24 @@ int main(void) {
   if(!polz_iszero(&c))
       fprintf(stderr,"ERROR in polz_reconstruct\n");
 
+  for(e=1;e<=DIGITBITS;e++) {
+    t = (LOGQ+e-1)/e;
+    for(i=0;i<16;i++) {
+      polzvec_almostuniform(&a,1,buf,nonce++);
+      polz_center(&a);
+      polz_decompose(y,&a,1,t,e);
+      polz_reconstruct(&c,y,1,t,e);
+      polz_sub(&c,&c,&a);
+      polz_reduce(&c);
+      polz_center(&c);
+      if(!polz_iszero(&c)) {
+        fprintf(stderr,"ERROR in polz_decompose/polz_reconstruct at digit width %zu\n",e);
+        return 1;
+      }
+    }
+  }
+  printf("polz_decompose/polz_reconstruct exact for digit widths 1..%d\n",DIGITBITS);
+
   return 0;
 }
 
