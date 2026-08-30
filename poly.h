@@ -69,14 +69,15 @@ void poly_sub_reduce(poly *r, const poly *a, const poly *b, const pdata *prime);
 void polyvec_pointwise_add(poly *r, const poly *a, const poly *b, size_t len, size_t stride, const pdata *prime);
 void polyvec_poly_pointwise_add(poly *r, const poly *a, const poly *b, size_t len, size_t stride, const pdata *prime);
 void polyvec_poly_pointwise_add_reduce(poly *r, const poly *a, const poly *b, size_t len, size_t stride, const pdata *prime);
-void polyvec_poly_pointwise_add_reduce2(poly *r, size_t rstride, const poly *a, const poly *b, size_t bstride, size_t len, const pdata *prime);
-void polyvec_sprod_pointwise(poly *r, const poly *a, const poly *b, size_t len, size_t stride, const pdata *prime);
-void polyvec_sprod_pointwise_add(poly *r, const poly *a, const poly *b, size_t len, size_t stride, const pdata *prime);
+void polyvec_sprod_pointwise(poly *r, const poly *a, const poly *b, size_t len, size_t stride, size_t chunk,
+                             const pdata *prime);
+void polyvec_sprod_pointwise_add(poly *r, const poly *a, const poly *b, size_t len, size_t stride, size_t chunk,
+                                 const pdata *prime);
 
 size_t polyvec_pointwise_extension(poly *c, const poly *a, const poly *b, size_t len, size_t stride,
-                                   size_t deg, const pdata *prime);
+                                   size_t deg, size_t chunk, const pdata *prime);
 size_t polyvec_collaps_add_extension(poly *c, const poly *a, const poly *b, size_t len, size_t stride, size_t deg,
-                                     const pdata *prime);
+                                     size_t chunk, const pdata *prime);
 
 void poly_scale(poly *r, const poly *a, int16_t s, const pdata *prime);
 void polyvec_scale(poly *r, const poly *a, size_t len, size_t stride, int16_t s, const pdata *prime);

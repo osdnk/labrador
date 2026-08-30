@@ -218,7 +218,7 @@ void sparsecnst_eval(polx *b, const sparsecnst *cnst, polx *sx[], const witness 
   for(i=0;i<cnst->a->len;i++) {
     j = cnst->a->rows[i];
     k = cnst->a->cols[i];
-    polxvec_sprod(t,sx[j],sx[k],MIN(n[j],n[k]));  // TODO: store?
+    polxvec_sprod(t,sx[j],sx[k],MIN(n[j],n[k]),SPROD_WORST);  // TODO: store?
     polx_mul(t,t,&cnst->a->coeffs[i]);
     polx_add(b,b,t);
   }
@@ -229,7 +229,7 @@ void sparsecnst_eval(polx *b, const sparsecnst *cnst, polx *sx[], const witness 
   for(i=0;i<cnst->nz;i++) {
     j = cnst->idx[i];
     k = cnst->off[i];
-    polxvec_mul_extension(t,dense_block(cnst,i,&scratch,&cap),&sx[j][k],cnst->len[i],deg2/cnst->mult[i],cnst->mult[i]);
+    polxvec_mul_extension(t,dense_block(cnst,i,&scratch,&cap),&sx[j][k],cnst->len[i],deg2/cnst->mult[i],cnst->mult[i],SPROD_WORST);
     polxvec_add(b,b,t,deg2);
   }
   free(scratch);
@@ -341,7 +341,7 @@ size_t sparsecnst_check_batch(const sparsecnst *cnst, size_t k, polx *sx[], cons
       shortphi_topolxvec(scratch,ent[i].sp,0,ent[i].len);
       phi = scratch;
     }
-    polxvec_mul_extension(t,phi,ent[i].s,ent[i].len,ent[i].deg2/ent[i].mult,ent[i].mult);
+    polxvec_mul_extension(t,phi,ent[i].s,ent[i].len,ent[i].deg2/ent[i].mult,ent[i].mult,SPROD_WORST);
     polxvec_add(ent[i].acc,ent[i].acc,t,ent[i].deg2);
   }
   free(scratch);
@@ -357,7 +357,7 @@ size_t sparsecnst_check_batch(const sparsecnst *cnst, size_t k, polx *sx[], cons
     for(j=0;j<cnst[i].a->len;j++) {
       u = cnst[i].a->rows[j];
       v = cnst[i].a->cols[j];
-      polxvec_sprod(t,sx[u],sx[v],MIN(n[u],n[v]));
+      polxvec_sprod(t,sx[u],sx[v],MIN(n[u],n[v]),SPROD_WORST);
       polx_mul(t,t,&cnst[i].a->coeffs[j]);
       polx_add(b,b,t);
     }
@@ -566,7 +566,7 @@ void collaps_sparsecnst_eval(polx *u, const statement *ost, const proof *pi, con
     polxvec_setzero(&u[m],1);
     for(j=0;j<icnst[i].nz;j++) {
       polxvec_sprod(t,dense_block(&icnst[i],j,&scratch,&cap),
-                    &sx[base[icnst[i].idx[j]]+icnst[i].off[j]],icnst[i].len[j]);
+                    &sx[base[icnst[i].idx[j]]+icnst[i].off[j]],icnst[i].len[j],SPROD_WALK);
       polx_add(&u[m],&u[m],t);
     }
     /* The round scales this by a full width challenge, which multiplies the CRT
@@ -784,7 +784,7 @@ void aggregate_sparsecnst(statement *ost, const proof *pi, const sparsecnst *cns
     quarternary_keep(alpha,alphacoeff,cnst[i].deg,&hashbuf[16],i);  // nonce is the global index
 
     if(cnst[i].b)
-      polxvec_sprod_add(ost->cnst->b,alpha,cnst[i].b,cnst[i].deg);
+      polxvec_sprod_add(ost->cnst->b,alpha,cnst[i].b,cnst[i].deg,SPROD_WORST);
 
     for(j=0;j<cnst[i].nz;j++) {
       polx *dst = dbase[cnst[i].idx[j]] + cnst[i].off[j];
@@ -807,7 +807,7 @@ void aggregate_sparsecnst(statement *ost, const proof *pi, const sparsecnst *cns
       }
       else
         polxvec_collaps_add_extension(dst,alpha,dense_block(&cnst[i],j,&scratch,&cap),cnst[i].len[j],
-                                      cnst[i].deg/cnst[i].mult[j],cnst[i].mult[j]);
+                                      cnst[i].deg/cnst[i].mult[j],cnst[i].mult[j],SPROD_WORST);
     }
 
     sparsemat_polx_mul_add(ost->cnst->a,alpha,cnst[i].a);

@@ -1,4 +1,5 @@
 #include <stdint.h>
+#include <math.h>
 #include <immintrin.h>
 #include "data.h"
 #include "polx.h"
@@ -385,7 +386,21 @@ void polxvec_polx_mul_add(polx *r, const polx *a, const polx *b, size_t len) {
   }
 }
 
-void polxvec_sprod(polx *r, const polx *a, const polx *b, size_t len) {
+/* The fixed point of |z| <= |mont|*(|z|/2^16 + p/2) + chunk*(3p/2)^2 against the int16 the
+ * Montgomery step has to land in, |z|/2^16 + p/2 <= 2^15-1; rounded down to a pair count. */
+static size_t sprod_chunk(size_t j, int bound) {
+  static size_t chunk[2][K];
+  const double p = primes[j].p, m = primes[j].mont < 0 ? -primes[j].mont : primes[j].mont;
+
+  if(!chunk[bound][j])
+    chunk[bound][j] = (bound == SPROD_WALK)
+                    ? (size_t)floor(pow(ldexp(1/3.2,31)/(p*p),2)) & ~(size_t)1
+                    : (size_t)floor((ldexp(32767.0 - p/2,16)*(1 - m/65536) - m*p/2)/(2.25*p*p)) & ~(size_t)1;
+
+  return chunk[bound][j];
+}
+
+void polxvec_sprod(polx *r, const polx *a, const polx *b, size_t len, int bound) {
   /* Blocked so that both operand slices of one chunk stay in L1 across the K
    * per-prime passes: two 16-polx slices are 32 KB, two 64-polx ones were 128 KB. */
   const size_t chunk = POLXCHUNK;
@@ -398,19 +413,19 @@ void polxvec_sprod(polx *r, const polx *a, const polx *b, size_t len) {
 
   l = MIN(chunk,len);
   for(j=0;j<K;j++)
-    polyvec_sprod_pointwise(&r->vec[j],&a->vec[j],&b->vec[j],l,K,&primes[j]);
+    polyvec_sprod_pointwise(&r->vec[j],&a->vec[j],&b->vec[j],l,K,sprod_chunk(j,bound),&primes[j]);
   for(i=chunk;i<len;i+=chunk) {
     l = MIN(chunk,len-i);
     for(j=0;j<K;j++)
-      polyvec_sprod_pointwise_add(&r->vec[j],&a[i].vec[j],&b[i].vec[j],l,K,&primes[j]);
+      polyvec_sprod_pointwise_add(&r->vec[j],&a[i].vec[j],&b[i].vec[j],l,K,sprod_chunk(j,bound),&primes[j]);
   }
 }
 
-void polxvec_sprod_add(polx *r, const polx *a, const polx *b, size_t len) {
+void polxvec_sprod_add(polx *r, const polx *a, const polx *b, size_t len, int bound) {
   size_t i;
 
   for(i=0;i<K;i++)
-    polyvec_sprod_pointwise_add(&r->vec[i],&a->vec[i],&b->vec[i],len,K,&primes[i]);
+    polyvec_sprod_pointwise_add(&r->vec[i],&a->vec[i],&b->vec[i],len,K,sprod_chunk(i,bound),&primes[i]);
 }
 
 void polx_scale(polx *r, const polx *a, int64_t s) {
@@ -471,22 +486,25 @@ void polxvec_scale_add(polx *r, const polx *a, size_t len, int64_t s) {
   }
 }
 
-size_t polxvec_mul_extension(polx *c, const polx *a, const polx *b, size_t len, size_t deg, size_t mult) {
+size_t polxvec_mul_extension(polx *c, const polx *a, const polx *b, size_t len, size_t deg, size_t mult, int bound) {
   size_t i,j,k = 0;
 
   if(deg == 1 && mult == 1) {
-    polxvec_sprod(c,a,b,len);
+    polxvec_sprod(c,a,b,len,bound);
     return len;
   }
 
   for(i=0;i<mult;i++)
     for(j=0;j<K;j++)
-      k = polyvec_pointwise_extension(&c[i].vec[j],&a->vec[j],&b[i].vec[j],len,K*mult,deg,&primes[j]);
+      k = polyvec_pointwise_extension(&c[i].vec[j],&a->vec[j],&b[i].vec[j],len,K*mult,deg,sprod_chunk(j,bound),
+                                      &primes[j]);
 
   return k;
 }
 
-size_t polxvec_collaps_add_extension(polx *c, const polx *a, const polx *b, size_t len, size_t deg, size_t mult) {
+size_t polxvec_collaps_add_extension(polx *c, const polx *a, const polx *b, size_t len, size_t deg, size_t mult,
+                                     int bound)
+{
   size_t i,j,k = 0;
 
   if(deg == 1 && mult == 1) {
@@ -496,7 +514,8 @@ size_t polxvec_collaps_add_extension(polx *c, const polx *a, const polx *b, size
 
   for(i=0;i<mult;i++)
     for(j=0;j<K;j++)
-      k = polyvec_collaps_add_extension(&c[i].vec[j],&a[i].vec[j],&b->vec[j],len,K*mult,deg,&primes[j]);
+      k = polyvec_collaps_add_extension(&c[i].vec[j],&a[i].vec[j],&b->vec[j],len,K*mult,deg,sprod_chunk(j,bound),
+                                        &primes[j]);
 
   return k;
 }

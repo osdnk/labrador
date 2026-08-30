@@ -242,14 +242,14 @@ static void simple_commit(statement *ost, witness *owt, proof *pi, commitment *c
     else
       polxvec_flip(&sx[s2][k],&sx[s0][k],n[i]);
 
-    polxvec_sprod(&sx[s1][i],&sx[s0][k],&sx[s2][k],n[i]);
+    polxvec_sprod(&sx[s1][i],&sx[s0][k],&sx[s2][k],n[i],SPROD_WALK);
     k += n[i];
   }
 
   const size_t kslack = k;
   polxvec_frompolyvec(&sx[s0][kslack],ewt->s[r-1],n[r-1]);
   polxvec_flip(&sx[s2][kslack],&sx[s0][kslack],n[r-1]);
-  polxvec_sprod(&sx[s1][r-1],&sx[s0][kslack],&sx[s2][kslack],n[r-1]);
+  polxvec_sprod(&sx[s1][r-1],&sx[s0][kslack],&sx[s2][kslack],n[r-1],SPROD_WALK);
 
   for(i=0;i<r;i++) {
     if(i < r-1 && ist->betasq[i])

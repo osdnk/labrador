@@ -58,13 +58,31 @@ void polz_setcoeff_fromint64(polz *r, int64_t a, int k) {
  r->limbs[L-1].c[k] = a;
 }
 
+/* The same base-2^14 split as polz_setcoeff_fromint64(), eight coefficients at a time: the
+ * limbs come out of one int64 lane by shifting, and vpmovqw truncates each to the int16
+ * lane the scalar store would have written, top limb included (arithmetic shift, so a
+ * negative input keeps its sign there). deg > 1 interleaves the coefficients, so the lanes
+ * of a poly are gathered with stride deg rather than loaded. */
 void polzvec_fromint64vec(polz *r, size_t len, size_t deg, const int64_t v[len*deg*N]) {
-  size_t i,j,k;
+  size_t i,j,k,l;
+  __m512i f;
+  const __m512i mask = _mm512_set1_epi64(0x3FFF);
+  const __m512i ramp = _mm512_mullo_epi64(_mm512_setr_epi64(0,1,2,3,4,5,6,7),_mm512_set1_epi64(deg));
 
   for(i=0;i<len;i++)
-    for(j=0;j<deg;j++)
-      for(k=0;k<N;k++)
-        polz_setcoeff_fromint64(&r[i*deg+j],v[i*deg*N+k*deg+j],k);
+    for(j=0;j<deg;j++) {
+      const int64_t *w = &v[i*deg*N+j];
+      polz *t = &r[i*deg+j];
+      for(k=0;k<N;k+=8) {
+        f = (deg == 1) ? _mm512_loadu_si512(&w[k])
+                       : _mm512_i64gather_epi64(_mm512_add_epi64(ramp,_mm512_set1_epi64(k*deg)),w,8);
+        for(l=0;l<L-1;l++) {
+          _mm512_mask_cvtepi64_storeu_epi16(&t->limbs[l].c[k],0xff,_mm512_and_si512(f,mask));
+          f = _mm512_srai_epi64(f,14);
+        }
+        _mm512_mask_cvtepi64_storeu_epi16(&t->limbs[L-1].c[k],0xff,f);
+      }
+    }
 }
 
 int polz_iszero_constcoeff(const polz *a) {

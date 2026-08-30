@@ -833,78 +833,144 @@ void polyvec_poly_pointwise_add_reduce(poly *r, const poly *a, const poly *b, si
   }
 }
 
-/* r[rstride*i] += a*b[bstride*i], Barrett-reduced. */
-void polyvec_poly_pointwise_add_reduce2(poly *r, size_t rstride, const poly *a, const poly *b, size_t bstride,
-                                        size_t len, const pdata *prime)
-{
-  size_t i,j;
+/* The int32 inner-product accumulator: 64 lanes as four __m512i, each 16 dwords holding
+ * two int16 halves that vpdpwssd multiplies and adds in one instruction. A dword pairs the
+ * same coefficient of two consecutive vector elements, so one pass over a pair of poly
+ * feeds every lane one exact product each. vpunpck{l,h}wd builds the pairing in a single
+ * shuffle per operand -- cheaper than the shift/blend pair Lazer uses -- at the price of
+ * the within-128-bit-group order 0,1,2,3,8,9,10,11,... which sprod_finish() permutes back.
+ *
+ * chunk is how many elements may accumulate before the lanes have to come back down: the
+ * caller picks it, since the safe value depends on whether the operands are honest. */
+static inline void sprod_pair(__m512i *z, const poly *a, const poly *b, size_t stride) {
+  size_t i;
+  __m512i f,g,h,k;
+
+  for(i=0;i<N/32;i++) {
+    f = _mm512_load_si512(&a[0].vec->v[i]);
+    h = _mm512_load_si512(&b[0].vec->v[i]);
+    g = _mm512_load_si512(&a[stride].vec->v[i]);
+    k = _mm512_load_si512(&b[stride].vec->v[i]);
+    z[2*i+0] = _mm512_dpwssd_epi32(z[2*i+0],_mm512_unpacklo_epi16(f,g),_mm512_unpacklo_epi16(h,k));
+    z[2*i+1] = _mm512_dpwssd_epi32(z[2*i+1],_mm512_unpackhi_epi16(f,g),_mm512_unpackhi_epi16(h,k));
+  }
+}
+
+/* Montgomery-reduce every lane and put it back multiplied by mont, which leaves the lane
+ * congruent to the partial sum but bounded by |mont|*(|z|/2^16 + p/2) again. */
+static inline void sprod_refresh(__m512i *z, const pdata *prime) {
+  size_t i;
   __m512i f,g;
-  __m512i al[N/32], ah[N/32];
+  const __m512i p = _mm512_set1_epi16(prime->p);
+  const __m512i pinv = _mm512_set1_epi16(prime->pinv);
+  const __m512i mont = _mm512_set1_epi32(prime->mont);
+  const __m512i zero = _mm512_setzero_si512();
+  const __mmask32 alt = _cvtu32_mask32(0x55555555);
+
+  for(i=0;i<N/32;i++) {
+    f = _mm512_srli_epi32(z[2*i+0],16);
+    g = _mm512_slli_epi32(z[2*i+1],16);
+    g = _mm512_mask_mov_epi16(g,alt,z[2*i+0]);
+    f = _mm512_mask_mov_epi16(z[2*i+1],alt,f);
+    g = _mm512_mullo_epi16(g,pinv);
+    g = _mm512_mulhi_epi16(g,p);
+    f = _mm512_sub_epi16(f,g);
+    g = _mm512_srli_epi32(f,16);
+    f = _mm512_maskz_mov_epi16(alt,f);
+    z[2*i+0] = _mm512_dpwssd_epi32(zero,mont,f);
+    z[2*i+1] = _mm512_dpwssd_epi32(zero,mont,g);
+  }
+}
+
+__attribute__((aligned(64)))
+static const int16_t sprod_order[32] = {
+   0, 2, 4, 6, 1, 3, 5, 7,  8,10,12,14, 9,11,13,15,
+  16,18,20,22,17,19,21,23, 24,26,28,30,25,27,29,31};
+
+/* Down to one Barrett-reduced int16 per lane, in coefficient order; add != 0 folds the
+ * old r in, matching the accumulate-then-reduce range of the scalar chain. */
+static inline void sprod_finish(poly *r, const __m512i *z, int add, const pdata *prime) {
+  size_t i;
+  __m512i f,g;
   const __m512i p = _mm512_set1_epi16(prime->p);
   const __m512i pinv = _mm512_set1_epi16(prime->pinv);
   const __m512i v = _mm512_set1_epi16(prime->v);
   const __m512i shift = _mm512_set1_epi16(1 << (16+15-27));
+  const __m512i order = _mm512_load_si512(sprod_order);
+  const __mmask32 alt = _cvtu32_mask32(0x55555555);
 
   for(i=0;i<N/32;i++) {
-    ah[i] = _mm512_load_si512(&a->vec->v[i]);
-    al[i] = _mm512_mullo_epi16(ah[i],pinv);
-  }
-
-  for(i=0;i<len;i++) {
-    for(j=0;j<N/32;j++) {
-      f = _mm512_load_si512(&b[bstride*i].vec->v[j]);
-      g = _mm512_mullo_epi16(f,al[j]);
-      f = _mm512_mulhi_epi16(f,ah[j]);
-      g = _mm512_mulhi_epi16(g,p);
-      f = _mm512_sub_epi16(f,g);
-      f = _mm512_add_epi16(f,_mm512_load_si512(&r[rstride*i].vec->v[j]));
+    f = _mm512_srli_epi32(z[2*i+0],16);
+    g = _mm512_slli_epi32(z[2*i+1],16);
+    g = _mm512_mask_mov_epi16(g,alt,z[2*i+0]);
+    f = _mm512_mask_mov_epi16(z[2*i+1],alt,f);
+    g = _mm512_mullo_epi16(g,pinv);
+    g = _mm512_mulhi_epi16(g,p);
+    f = _mm512_sub_epi16(f,g);
+    g = _mm512_mulhi_epi16(f,v);
+    g = _mm512_mulhrs_epi16(g,shift);
+    g = _mm512_mullo_epi16(g,p);
+    f = _mm512_sub_epi16(f,g);
+    f = _mm512_permutexvar_epi16(order,f);
+    if(add) {
+      f = _mm512_add_epi16(f,_mm512_load_si512(&r->vec->v[i]));
       g = _mm512_mulhi_epi16(f,v);
       g = _mm512_mulhrs_epi16(g,shift);
       g = _mm512_mullo_epi16(g,p);
       f = _mm512_sub_epi16(f,g);
-      _mm512_store_si512(&r[rstride*i].vec->v[j],f);
     }
+    _mm512_store_si512(&r->vec->v[i],f);
   }
 }
 
-void polyvec_sprod_pointwise(poly *r, const poly *a, const poly *b, size_t len, size_t stride, const pdata *prime) {
-  size_t i;
-  const int extrared = (prime->p & 0x2000) ? 1 : 0;
+static void sprod_body(poly *r, const poly *a, const poly *b, size_t len, size_t stride, size_t chunk,
+                       int add, const pdata *prime)
+{
+  size_t i,c;
+  __m512i z[N/16];
 
+  for(i=0;i<N/16;i++) z[i] = _mm512_setzero_si512();
+  for(;;) {
+    c = MIN(chunk,len) & ~(size_t)1;
+    for(i=0;i<c/2;i++)
+      sprod_pair(z,&a[2*i*stride],&b[2*i*stride],stride);
+    a += c*stride;
+    b += c*stride;
+    len -= c;
+    if(len < 2) break;
+    sprod_refresh(z,prime);
+  }
+  sprod_finish(r,z,add,prime);
+  if(len) {
+    poly_pointwise_add(r,a,b,prime);
+    poly_reduce(r,prime);
+  }
+}
+
+void polyvec_sprod_pointwise(poly *r, const poly *a, const poly *b, size_t len, size_t stride, size_t chunk,
+                             const pdata *prime)
+{
   if(!len) {
     polyvec_setzero(r,1);
     return;
   }
-
-  poly_pointwise(r,&a[0],&b[0],prime);
-  for(i=1;i<len-1;i+=2) {
-    poly_pointwise_add(r,&a[stride*(i+0)],&b[stride*(i+0)],prime);
-    if(extrared) poly_reduce(r,prime);
-    poly_pointwise_add(r,&a[stride*(i+1)],&b[stride*(i+1)],prime);
-    poly_reduce(r,prime);
+  if(len == 1) {
+    poly_pointwise(r,&a[0],&b[0],prime);
+    return;
   }
-  if(i<len) {
-    poly_pointwise_add(r,&a[stride*i],&b[stride*i],prime);
-    poly_reduce(r,prime);
-  }
+  sprod_body(r,a,b,len,stride,chunk,0,prime);
 }
 
-void polyvec_sprod_pointwise_add(poly *r, const poly *a, const poly *b, size_t len, size_t stride, const pdata *prime) {
-  size_t i;
-  const int extrared = (prime->p & 0x2000) ? 1 : 0;
-
+void polyvec_sprod_pointwise_add(poly *r, const poly *a, const poly *b, size_t len, size_t stride, size_t chunk,
+                                 const pdata *prime)
+{
   if(!len) return;
-
-  for(i=0;i<len-1;i+=2) {
-    poly_pointwise_add(r,&a[stride*(i+0)],&b[stride*(i+0)],prime);
-    if(extrared) poly_reduce(r,prime);
-    poly_pointwise_add(r,&a[stride*(i+1)],&b[stride*(i+1)],prime);
+  if(len == 1) {
+    poly_pointwise_add(r,&a[0],&b[0],prime);
     poly_reduce(r,prime);
+    return;
   }
-  if(i<len) {
-    poly_pointwise_add(r,&a[stride*i],&b[stride*i],prime);
-    poly_reduce(r,prime);
-  }
+  sprod_body(r,a,b,len,stride,chunk,1,prime);
 }
 
 static size_t next2power(size_t a) {
@@ -938,51 +1004,129 @@ static size_t bitrev(size_t k, size_t n) {
   return t[k] >> (5-n);
 }
 
-size_t polyvec_pointwise_extension(poly *c, const poly *a, const poly *b, size_t len, size_t stride, size_t deg,
-                                   const pdata *prime)
-{
-  size_t i,k;
-  size_t deg2;
-  poly tu[deg], tl[deg];
 
-  /* shortcut */
+static inline void ext_pair(__m512i *p, const poly *a0, const poly *a1) {
+  size_t i;
+  __m512i f,g;
+
+  for(i=0;i<N/32;i++) {
+    f = _mm512_load_si512(&a0->vec->v[i]);
+    g = _mm512_load_si512(&a1->vec->v[i]);
+    p[2*i+0] = _mm512_unpacklo_epi16(f,g);
+    p[2*i+1] = _mm512_unpackhi_epi16(f,g);
+  }
+}
+
+static inline void ext_pair_lo(__m512i *p, const poly *a0) {
+  size_t i;
+  __m512i f;
+  const __m512i zero = _mm512_setzero_si512();
+
+  for(i=0;i<N/32;i++) {
+    f = _mm512_load_si512(&a0->vec->v[i]);
+    p[2*i+0] = _mm512_unpacklo_epi16(f,zero);
+    p[2*i+1] = _mm512_unpackhi_epi16(f,zero);
+  }
+}
+
+static inline void ext_pair_hi(__m512i *p, const poly *a1) {
+  size_t i;
+  __m512i g;
+  const __m512i zero = _mm512_setzero_si512();
+
+  for(i=0;i<N/32;i++) {
+    g = _mm512_load_si512(&a1->vec->v[i]);
+    p[2*i+0] = _mm512_unpacklo_epi16(zero,g);
+    p[2*i+1] = _mm512_unpackhi_epi16(zero,g);
+  }
+}
+
+static inline void ext_madd(__m512i *z, const __m512i *q, const __m512i *p) {
+  size_t i;
+
+  for(i=0;i<N/16;i++)
+    z[i] = _mm512_dpwssd_epi32(z[i],q[i],p[i]);
+}
+
+/* One block of deg2 = next2power(deg) elements multiplies as a product modulo Y^deg2 - X,
+ * of which only the first deg coefficients are kept: hl[t] collects the terms with i+n = t
+ * and hu[t] those with i+n = deg2+t, the ones the wrap sends back multiplied by X.
+ *
+ * Pairing consecutive b elements lets one vpdpwssd do two of those terms at once, which
+ * needs a[m] and a[m-1] side by side in a dword; pp[m] holds exactly that pair, so pp is
+ * built once per block and every accumulator reads a shifted window of it. With a_-1 and
+ * a_deg2 taken as zero the two ends of the window need no special case. */
+size_t polyvec_pointwise_extension(poly *c, const poly *a, const poly *b, size_t len, size_t stride, size_t deg,
+                                   size_t chunk, const pdata *prime)
+{
+  size_t i,k,m,t,ib,kb,deg2,pairs,acc = 0;
+
   if(deg == 1) {
-    polyvec_sprod_pointwise(c,a,b,len,stride,prime);
+    polyvec_sprod_pointwise(c,a,b,len,stride,chunk,prime);
     return len;
   }
 
   deg2 = next2power(deg);
-  polyvec_setzero(tu,deg);
-  polyvec_setzero(tl,deg);
+  pairs = deg2/2;
 
-  k = 0;
+  __m512i pp[(deg2+1)*(N/16)], qq[pairs*(N/16)];
+  __m512i hl[deg*(N/16)], hu[deg*(N/16)];
+  size_t fl[deg], fu[deg];
+  poly tl[1], tu[1], x[1];
+
+  for(i=0;i<deg*(N/16);i++) {
+    hl[i] = _mm512_setzero_si512();
+    hu[i] = _mm512_setzero_si512();
+  }
+  for(t=0;t<deg;t++)
+    fl[t] = fu[t] = 0;
+
   while(len) {
-    for(i=0;i<MIN(deg,len);i++) {  // columns
-      polyvec_poly_pointwise_add_reduce2(&tu[0],1,&b[stride*i],&a[stride*(deg2-i)],stride,i,prime);
-      polyvec_poly_pointwise_add_reduce2(&tl[i],1,&b[stride*i],&a[stride*0],stride,deg-i,prime);
+    ib = MIN(deg2,len);
+    kb = (ib+1)/2;
+
+    ext_pair_lo(&pp[0],&a[0]);
+    for(m=1;m<deg2;m++)
+      ext_pair(&pp[m*(N/16)],&a[stride*m],&a[stride*(m-1)]);
+    ext_pair_hi(&pp[deg2*(N/16)],&a[stride*(deg2-1)]);
+    for(k=0;k<kb;k++) {
+      if(2*k+1 < ib) ext_pair(&qq[k*(N/16)],&b[stride*(2*k)],&b[stride*(2*k+1)]);
+      else           ext_pair_lo(&qq[k*(N/16)],&b[stride*(2*k)]);
     }
-    for(i=deg;i<MIN(deg2,len);i++)
-      polyvec_poly_pointwise_add_reduce2(&tu[0],1,&b[stride*i],&a[stride*(deg2-i)],stride,deg,prime);
+
+    for(t=0;t<deg;t++) {
+      for(k=0;k<=t/2 && k<kb;k++) {
+        if(fl[t] == chunk) { sprod_refresh(&hl[t*(N/16)],prime); fl[t] = 0; }
+        ext_madd(&hl[t*(N/16)],&qq[k*(N/16)],&pp[(t-2*k)*(N/16)]);
+        fl[t] += 2;
+      }
+      for(k=(t+1)/2;k<pairs && k<kb;k++) {
+        if(fu[t] == chunk) { sprod_refresh(&hu[t*(N/16)],prime); fu[t] = 0; }
+        ext_madd(&hu[t*(N/16)],&qq[k*(N/16)],&pp[(deg2+t-2*k)*(N/16)]);
+        fu[t] += 2;
+      }
+    }
 
     a += stride*deg2;
     b += stride*deg2;
-    k += deg2;
-    len -= MIN(deg2,len);
+    acc += deg2;
+    len -= ib;
   }
 
-  poly x[1];
   poly_monomial_ntt(x,1,1,prime);
-  polyvec_poly_pointwise(tu,x,tu,deg,1,prime);
-  //polyvec_reduce(tl,deg,1,prime);
-  for(i=0;i<deg;i++)
-    poly_add(&c[stride*i],&tu[i],&tl[i]);
+  for(t=0;t<deg;t++) {
+    sprod_finish(tl,&hl[t*(N/16)],0,prime);
+    sprod_finish(tu,&hu[t*(N/16)],0,prime);
+    poly_pointwise(tu,x,tu,prime);
+    poly_add(&c[stride*t],tu,tl);
+  }
   polyvec_reduce(c,deg,stride,prime);
 
-  return k;
+  return acc;
 }
 
 size_t polyvec_collaps_add_extension(poly *c, const poly *a, const poly *b, size_t len, size_t stride, size_t deg,
-                                     const pdata *prime)
+                                     size_t chunk, const pdata *prime)
 {
   size_t i,k;
   size_t deg2;
@@ -1003,11 +1147,11 @@ size_t polyvec_collaps_add_extension(poly *c, const poly *a, const poly *b, size
   k = 0;
   while(len) {
     for(i=0;i<MIN(deg,len);i++) {
-      polyvec_sprod_pointwise_add(&c[stride*i],&tu[stride*0],&b[stride*(deg2-i)],i,stride,prime);
-      polyvec_sprod_pointwise_add(&c[stride*i],&tl[stride*i],&b[stride*0],deg-i,stride,prime);
+      polyvec_sprod_pointwise_add(&c[stride*i],&tu[stride*0],&b[stride*(deg2-i)],i,stride,chunk,prime);
+      polyvec_sprod_pointwise_add(&c[stride*i],&tl[stride*i],&b[stride*0],deg-i,stride,chunk,prime);
     }
     for(i=deg;i<MIN(deg2,len);i++)
-      polyvec_sprod_pointwise_add(&c[stride*i],&tu[stride*0],&b[stride*(deg2-i)],deg,stride,prime);
+      polyvec_sprod_pointwise_add(&c[stride*i],&tu[stride*0],&b[stride*(deg2-i)],deg,stride,chunk,prime);
 
     c += stride*deg2;
     b += stride*deg2;

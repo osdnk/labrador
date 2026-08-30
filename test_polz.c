@@ -125,7 +125,7 @@ static void test_mul_extension(size_t deg) {
   polxvec_frompolyvec(bx,t,deg);
 
   polz_kroneckermul_extension(a,a,b,deg);
-  polxvec_mul_extension(cx,ax,bx,deg,deg,1);
+  polxvec_mul_extension(cx,ax,bx,deg,deg,1,SPROD_WORST);
 
   polzvec_frompolxvec(b,cx,deg);
   polzvec_sub(a,a,b,deg);
@@ -135,10 +135,10 @@ static void test_mul_extension(size_t deg) {
 
   polx alpha[deg], tmp0[1], tmp1[1];
   polxvec_quarternary(alpha,deg,seed,nonce++);
-  polxvec_sprod(tmp0,alpha,cx,deg);
+  polxvec_sprod(tmp0,alpha,cx,deg,SPROD_WORST);
   polxvec_setzero(cx,deg);
-  polxvec_collaps_add_extension(cx,alpha,ax,deg,deg,1);
-  polxvec_sprod(tmp1,cx,bx,deg);
+  polxvec_collaps_add_extension(cx,alpha,ax,deg,deg,1,SPROD_WORST);
+  polxvec_sprod(tmp1,cx,bx,deg,SPROD_WORST);
   polx_sub(tmp0,tmp0,tmp1);
   if(!polx_iszero(tmp0))
     fprintf(stderr,"ERROR in polxvec_collaps_add_extension()\n");
