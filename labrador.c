@@ -16,6 +16,10 @@
 #include "jlproj.h"
 #include "labrador.h"
 
+/* Ranks per pass over the garbage pairs: 16 polx per row is 16 KB, so a handful of rows
+ * and the (r*r+r)/2 accumulators stay in cache while every pair reads the block. */
+#define GARBAGEBLOCK 16
+
 size_t comkey_len = 0;
 polx *comkey = NULL;
 
@@ -532,8 +536,11 @@ double print_witness_pp(const witness *wt) {
   return s;
 }
 
+/* Reconstructing every decomposition and comparing costs ~4% of the prover, so
+ * the self-check is opt-in; build with -DCHECK_DECOMPOSE to get it back. */
 static void decompose_checked(poly *r, const polx *a, size_t len, size_t f, size_t b, const char *where) {
   polxvec_decompose(r,a,len,f,b);
+#ifdef CHECK_DECOMPOSE
   polx *rec = _aligned_alloc(64,len*sizeof(polx));
   polxvec_reconstruct(rec,r,len,f,b);
   polxvec_sub(rec,rec,a,len);
@@ -542,6 +549,9 @@ static void decompose_checked(poly *r, const polx *a, size_t len, size_t f, size
     exit(1);
   }
   free(rec);
+#else
+  (void)where;
+#endif
 }
 
 size_t commit_raw(polx *u, poly *t, size_t r, size_t n, const polx s[r][n],
@@ -553,18 +563,18 @@ size_t commit_raw(polx *u, poly *t, size_t r, size_t n, const polx s[r][n],
 
   if(tail) {
     for(i=0;i<r;i++)
-      polxvec_mul_extension(&u[off+i*l],comkey,s[i],n,cpp->kappa,1);
+      polxvec_mul_extension(&u[off+i*l],comkey,s[i],n,cpp->kappa,1,SPROD_WALK);
     return off+r*l;
   }
 
   for(i=0;i<r;i++) {
     /* inner commitment */
-    polxvec_mul_extension(tx,comkey,s[i],n,cpp->kappa,1);
+    polxvec_mul_extension(tx,comkey,s[i],n,cpp->kappa,1,SPROD_WALK);
     decompose_checked(&t[i*l],tx,cpp->kappa,cpp->fu,cpp->bu,"commit_raw");
 
     /* outer commitment */
     polxvec_frompolyvec(tx,&t[i*l],l);
-    off += polxvec_mul_extension(tx,&comkey[off],tx,l,cpp->kappa1,1);
+    off += polxvec_mul_extension(tx,&comkey[off],tx,l,cpp->kappa1,1,SPROD_WALK);
     polxvec_add(u,u,tx,cpp->kappa1);
   }
 
@@ -582,18 +592,23 @@ size_t qugarbage_raw(polx *u, poly *g, size_t r, size_t n, const polx s[r][n],
   if(!cpp->fg)
     return off;
 
+  /* gx[k+t] = <s[i], s[i+t]>: an inner product over the rank, taken a block of ranks at a
+   * time so that the block's r rows stay cached across the (r*r+r)/2 pairs that read them. */
   polxvec_setzero(gx,len);
-  for(l=0;l<n;l++) {
+  for(l=0;l<n;l+=GARBAGEBLOCK) {
+    const size_t bl = MIN(GARBAGEBLOCK,n-l);
     k = 0;
-    for(i=0;i<r;i++)
-      for(j=i;j<r;j++)
-        polx_mul_add(&gx[k++],&s[i][l],&s[j][l]);
+    for(i=0;i<r;i++) {
+      for(j=0;j<r-i;j++)
+        polxvec_sprod_add(&gx[k+j],&s[i][l],&s[i+j][l],bl,SPROD_WALK);
+      k += r-i;
+    }
   }
 
   if(!tail) {
     decompose_checked(g,gx,len,cpp->fg,cpp->bg,"qugarbage_raw");
     polxvec_frompolyvec(gx,g,cpp->fg*len);
-    off += polxvec_mul_extension(gx,&comkey[off],gx,cpp->fg*len,cpp->kappa1,1);
+    off += polxvec_mul_extension(gx,&comkey[off],gx,cpp->fg*len,cpp->kappa1,1,SPROD_WALK);
     polxvec_add(u,u,gx,cpp->kappa1);
   }
 
@@ -754,12 +769,22 @@ void collaps_jlproj(constraint *cnst, statement *st, const proof *pi, const uint
   collaps_jlproj_raw(cnst,st->r,st->n,st->h,pi->p,jlmat);
 }
 
-void lift_aggregate_zqcnst(statement *ost, proof *pi, size_t i, constraint *cnst, const polx sx[ost->r][ost->n]) {
+void lift_aggregate_zqcnst(statement *ost, proof *pi, size_t i, constraint *cnst, const polx sx[ost->r][ost->n],
+                           const zqdefer *df)
+{
   __attribute__((aligned(16)))
   uint8_t hashbuf[16+N*QBYTES];
+  size_t c;
   polx alpha[1];
 
-  polxvec_sprod(cnst->b,cnst->phi,*sx,ost->r*ost->n);
+  polxvec_sprod(cnst->b,cnst->phi,*sx,ost->r*ost->n,SPROD_WALK);
+  /* The degree-0 phi is not in cnst->phi any more; its share of <phi,s> is the same
+   * <phi_c,s> in every round, scaled by this round's scalar. */
+  if(df) {
+    for(c=0;c<df->k0;c++)
+      polx_scale_add(cnst->b,&df->u[c],df->s[c]);
+    polx_refresh(cnst->b);
+  }
   polz_frompolx(&pi->bb[i],cnst->b);
   polz_setcoeff_fromint64(&pi->bb[i],0,0);
   memcpy(hashbuf,ost->h,16);
@@ -767,6 +792,9 @@ void lift_aggregate_zqcnst(statement *ost, proof *pi, size_t i, constraint *cnst
   shake128(hashbuf,32,hashbuf,sizeof(hashbuf));
   memcpy(ost->h,hashbuf,16);
   polxvec_quarternary(alpha,1,&hashbuf[16],0);
+  if(df)
+    for(c=0;c<df->k0;c++)
+      polx_scale_add(&df->t[c],alpha,df->s[c]);
   if(!i) {
     polxvec_polx_mul(ost->cnst->phi,alpha,cnst->phi,ost->r*ost->n);
     polx_mul(ost->cnst->b,alpha,cnst->b);
@@ -779,9 +807,12 @@ void lift_aggregate_zqcnst(statement *ost, proof *pi, size_t i, constraint *cnst
   }
 }
 
-void reduce_lift_aggregate_zqcnst(statement *ost, const proof *pi, size_t i, const constraint *cnst) {
+void reduce_lift_aggregate_zqcnst(statement *ost, const proof *pi, size_t i, const constraint *cnst,
+                                  const zqdefer *df)
+{
   __attribute__((aligned(16)))
   uint8_t hashbuf[16+N*QBYTES];
+  size_t c;
   polz b[1];
   polx alpha[1];
   zz c0[1];
@@ -797,6 +828,9 @@ void reduce_lift_aggregate_zqcnst(statement *ost, const proof *pi, size_t i, con
   shake128(hashbuf,32,hashbuf,sizeof(hashbuf));
   memcpy(ost->h,hashbuf,16);
   polxvec_quarternary(alpha,1,&hashbuf[16],0);
+  if(df)
+    for(c=0;c<df->k0;c++)
+      polx_scale_add(&df->t[c],alpha,df->s[c]);
   if(!i) {
     polxvec_polx_mul(ost->cnst->phi,alpha,cnst->phi,ost->r*ost->n);
     polx_mul(ost->cnst->b,alpha,cnst->b);
@@ -846,13 +880,13 @@ static void aggregate(statement *ost, const proof *pi, const statement *ist) {
   /* Bv1 = u1 */
   j = 0;
   for(i=0;i<r;i++)
-    j += polxvec_collaps_add_extension(&phiv[t+i*l],alpha,&comkey[j],l,cpp->kappa1,1);
-  polxvec_collaps_add_extension(&phiv[g],alpha,&comkey[j],h-g,cpp->kappa1,1);
-  polxvec_sprod_add(ost->cnst->b,alpha,ist->u1,cpp->kappa1);
+    j += polxvec_collaps_add_extension(&phiv[t+i*l],alpha,&comkey[j],l,cpp->kappa1,1,SPROD_WORST);
+  polxvec_collaps_add_extension(&phiv[g],alpha,&comkey[j],h-g,cpp->kappa1,1,SPROD_WORST);
+  polxvec_sprod_add(ost->cnst->b,alpha,ist->u1,cpp->kappa1,SPROD_WORST);
 
   /* Bv2 = u2 */
-  polxvec_collaps_add_extension(&phiv[h],beta,comkey,m-h,cpp->kappa1,1);
-  polxvec_sprod_add(ost->cnst->b,beta,ist->u2,cpp->kappa1);
+  polxvec_collaps_add_extension(&phiv[h],beta,comkey,m-h,cpp->kappa1,1,SPROD_WORST);
+  polxvec_sprod_add(ost->cnst->b,beta,ist->u2,cpp->kappa1,SPROD_WORST);
 
   /*    gamma:         - Az      + \sum_i  c_i t_i                 = 0 */
   /* delta[0]: - <z,z>           + \sum_ij c_i c_j g_ij            = 0 */
@@ -861,7 +895,7 @@ static void aggregate(statement *ost, const proof *pi, const statement *ist) {
 
   /* -Az, -<phi,z> */
   polxvec_copy(tmp,ist->cnst->phi,n);
-  polxvec_collaps_add_extension(tmp,gamma,comkey,n,cpp->kappa,1);
+  polxvec_collaps_add_extension(tmp,gamma,comkey,n,cpp->kappa,1,SPROD_WORST);
   j = k = 0;
   for(i=0;i<cpp->f;i++) {
     if(i) polxvec_scale(tmp,tmp,n,(int64_t)1 << cpp->b);
@@ -955,7 +989,7 @@ static void amortize_tail(statement *ost, witness *owt, proof *pi, polx sx[ost->
   polx *hx = ost->u2;
   polz *hz = pi->u2;
 
-  polxvec_sprod(&hx[0],phi[0],sx[0],n);
+  polxvec_sprod(&hx[0],phi[0],sx[0],n,SPROD_WALK);
   polz_frompolx(&hz[0],&hx[0]);
 
   memcpy(hashbuf,ost->h,16);
@@ -967,9 +1001,9 @@ static void amortize_tail(statement *ost, witness *owt, proof *pi, polx sx[ost->
   polxvec_polx_mul(phi[0],&ost->c[0],phi[0],n);
 
   for(i=1;i<r;i++) {
-    polxvec_sprod(&hx[2*i-1],phi[i],sx[0],n);
-    polxvec_sprod_add(&hx[2*i-1],phi[0],sx[i],n);
-    polxvec_sprod(&hx[2*i],phi[i],sx[i],n);
+    polxvec_sprod(&hx[2*i-1],phi[i],sx[0],n,SPROD_WALK);
+    polxvec_sprod_add(&hx[2*i-1],phi[0],sx[i],n,SPROD_WALK);
+    polxvec_sprod(&hx[2*i],phi[i],sx[i],n,SPROD_WALK);
     polzvec_frompolxvec(&hz[2*i-1],&hx[2*i-1],2);
     polzvec_bitpack(&hashbuf[16],&hz[2*i-1],2);
     shake128(hashbuf,32,hashbuf,16+2*N*QBYTES);
@@ -1012,22 +1046,26 @@ void amortize(statement *ost, witness *owt, proof *pi, polx sx[ost->r][ost->n]) 
   polx *hx = (polx*)_aligned_alloc(64,(m-h)*sizeof(polx));
 
   /* linear garbage */
+  /* hx[k+t] = <phi[i], sx[i+t]> + <phi[i+t], sx[i]>, blocked over the rank like the
+   * quadratic garbage so both rows of a block stay cached across the pairs. */
   polxvec_setzero(hx,(r*r+r)/2);
-  for(l=0;l<n;l++) {
+  for(l=0;l<n;l+=GARBAGEBLOCK) {
+    const size_t bl = MIN(GARBAGEBLOCK,n-l);
     k = 0;
     for(i=0;i<r;i++) {
-      polx_mul_add(&hx[k++],&phi[i][l],&sx[i][l]);
-      for(j=i+1;j<r;j++) {
-        polx_mul_add(&hx[k],&phi[i][l],&sx[j][l]);
-        polx_mul_add(&hx[k++],&phi[j][l],&sx[i][l]);
+      polxvec_sprod_add(&hx[k],&phi[i][l],&sx[i][l],bl,SPROD_WALK);
+      for(j=1;j<r-i;j++) {
+        polxvec_sprod_add(&hx[k+j],&phi[i][l],&sx[i+j][l],bl,SPROD_WALK);
+        polxvec_sprod_add(&hx[k+j],&sx[i][l],&phi[i+j][l],bl,SPROD_WALK);
       }
+      k += r-i;
     }
   }
   decompose_checked(vh,hx,(r*r+r)/2,cpp->fu,cpp->bu,"amortize linear garbage");
   polxvec_frompolyvec(hx,vh,m-h);
 
   /* second outer commitment */
-  polxvec_mul_extension(ost->u2,comkey,hx,m-h,cpp->kappa1,1);
+  polxvec_mul_extension(ost->u2,comkey,hx,m-h,cpp->kappa1,1,SPROD_WALK);
   polzvec_frompolxvec(pi->u2,ost->u2,cpp->u2len);
 
   /* amortization */
@@ -1138,7 +1176,7 @@ int prove(statement *ost, witness *owt, proof *pi, const statement *ist, const w
     init_constraint_raw(cnst,ost->r,ost->n,1,0);
     for(i=0;i<LIFTS;i++) {
       collaps_jlproj(cnst,ost,pi,jlmat);
-      lift_aggregate_zqcnst(ost,pi,i,cnst,sx);
+      lift_aggregate_zqcnst(ost,pi,i,cnst,sx,NULL);
     }
     free_constraint(cnst);
 
@@ -1177,7 +1215,7 @@ int reduce(statement *ost, const proof *pi, const statement *ist) {
 
   for(i=0;i<LIFTS;i++) {
     collaps_jlproj(cnst,ost,pi,jlmat);
-    reduce_lift_aggregate_zqcnst(ost,pi,i,cnst);
+    reduce_lift_aggregate_zqcnst(ost,pi,i,cnst,NULL);
   }
   free_constraint(cnst);
   free(jlmat);
@@ -1236,11 +1274,11 @@ int verify(const statement *st, const witness *wt) {
     j = 0;
     for(i=0;i<r;i++) {
       polxvec_frompolyvec(&v[t+i*l],&wt->s[cpp->f][t+i*l],l);
-      j += polxvec_mul_extension(tmp1,&comkey[j],&v[t+i*l],l,cpp->kappa1,1);
+      j += polxvec_mul_extension(tmp1,&comkey[j],&v[t+i*l],l,cpp->kappa1,1,SPROD_WORST);
       polxvec_sub(tmp0,tmp0,tmp1,cpp->kappa1);
     }
     polxvec_frompolyvec(&v[g],&wt->s[cpp->f][g],h-g);
-    polxvec_mul_extension(tmp1,&comkey[j],&v[g],h-g,cpp->kappa1,1);
+    polxvec_mul_extension(tmp1,&comkey[j],&v[g],h-g,cpp->kappa1,1,SPROD_WORST);
     polxvec_sub(tmp0,tmp0,tmp1,cpp->kappa1);
     if(!polxvec_iszero(tmp0,cpp->kappa1)) {
       fprintf(stderr,"ERROR in verify(): First outer commitment opening wrong\n");
@@ -1250,7 +1288,7 @@ int verify(const statement *st, const witness *wt) {
 
     /* Bv2 = u2 */
     polxvec_frompolyvec(&v[h],&wt->s[cpp->f][h],m-h);
-    polxvec_mul_extension(tmp0,comkey,&v[h],m-h,cpp->kappa1,1);
+    polxvec_mul_extension(tmp0,comkey,&v[h],m-h,cpp->kappa1,1,SPROD_WORST);
     polxvec_sub(tmp0,tmp0,st->u2,cpp->kappa1);
     if(!polxvec_iszero(tmp0,cpp->kappa1)) {
       fprintf(stderr,"ERROR in verify(): Second outer commitment opening wrong\n");
@@ -1279,7 +1317,7 @@ int verify(const statement *st, const witness *wt) {
   polxvec_polx_mul(&v[t],&st->c[0],&v[t],cpp->kappa);
   for(i=1;i<r;i++)
     polxvec_polx_mul_add(&v[t],&st->c[i],&v[t+i*l],cpp->kappa);
-  polxvec_mul_extension(tmp0,comkey,z,n,cpp->kappa,1);
+  polxvec_mul_extension(tmp0,comkey,z,n,cpp->kappa,1,SPROD_WORST);
   polxvec_sub(tmp0,tmp0,&v[t],cpp->kappa);
   if(!polxvec_iszero(tmp0,cpp->kappa)) {
     fprintf(stderr,"ERROR in verify(): Amortized (inner commitment) opening wrong\n");
@@ -1309,13 +1347,13 @@ int verify(const statement *st, const witness *wt) {
     k = 0;
     for(i=0;i<r;i++) {
       polx_mul(tmp0,&st->c[i],&v[g+k]);
-      polxvec_sprod(&tmp0[1],&st->c[i+1],&v[g+k+1],r-1-i);
+      polxvec_sprod(&tmp0[1],&st->c[i+1],&v[g+k+1],r-1-i,SPROD_WORST);
       polx_scale_add(tmp0,&tmp0[1],2);
       if(i) polx_mul_add(&v[g],&st->c[i],tmp0);
       else polx_mul(&v[g],&st->c[i],tmp0);
       k += r-i;
     }
-    polxvec_sprod(tmp0,z,z,n);
+    polxvec_sprod(tmp0,z,z,n,SPROD_WORST);
     polx_sub(tmp0,tmp0,&v[g]);
     if(!polx_iszero(tmp0)) {
       fprintf(stderr,"ERROR in verify(): Quadratic garbage polynomials wrong\n");
@@ -1328,7 +1366,7 @@ int verify(const statement *st, const witness *wt) {
   if(!st->tail) {
     k = 0;
     for(i=0;i<r;i++) {
-      polxvec_sprod(tmp0,&st->c[i],&v[h+k],r-i);
+      polxvec_sprod(tmp0,&st->c[i],&v[h+k],r-i,SPROD_WORST);
       if(i) polx_mul_add(&v[h],&st->c[i],tmp0);
       else polx_mul(&v[h],&st->c[i],tmp0);
       k += r-i;
@@ -1342,7 +1380,7 @@ int verify(const statement *st, const witness *wt) {
       polx_mul_add(&v[h],&st->c[i],&v[h+2*i-1]);
     }
   }
-  polxvec_sprod(tmp0,st->cnst->phi,z,n);
+  polxvec_sprod(tmp0,st->cnst->phi,z,n,SPROD_WORST);
   polx_sub(tmp0,tmp0,&v[h]);
   if(!polxvec_iszero(tmp0,1)) {
     fprintf(stderr,"ERROR in verify(): Linear garbage polynomials wrong\n");

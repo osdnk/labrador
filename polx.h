@@ -8,10 +8,17 @@ typedef struct {
   poly vec[K];
 } polx;
 
+/* How many products may pile up in an int32 sprod lane before the next Montgomery
+ * reduction. SPROD_WALK is Lazer's random-walk bound, which the prover may use on its own
+ * witness; SPROD_WORST is the bound that survives any operands the invariant admits and is
+ * what every product reading a proof has to use. */
+enum { SPROD_WALK, SPROD_WORST };
+
 void polx_print(const polx *a);
 void polx_getcoeff(zz *r, const polx *a, int k);
 void polxvec_setzero(polx *r, size_t len);
 void polxvec_fromint64vec(polx *r, size_t len, size_t deg, const int64_t a[len*deg*N]);
+void polxvec_fromint32vec(polx *r, size_t len, const int32_t a[len*N]);
 int polx_iszero(const polx *a);
 int polxvec_iszero(const polx *a, size_t len);
 int polx_iszero_constcoeff(const polx *a);
@@ -48,10 +55,11 @@ void polxvec_polx_mul(polx *r, const polx *a, const polx *b, size_t len);
 void polx_mul_add(polx *r, const polx *a, const polx *b);
 void polxvec_mul_add(polx *r, const polx *a, const polx *b, size_t len);
 void polxvec_polx_mul_add(polx *r, const polx *a, const polx *b, size_t len);
-void polxvec_sprod(polx *r, const polx *a, const polx *b, size_t len);
-void polxvec_sprod_add(polx *r, const polx *a, const polx *b, size_t len);
-size_t polxvec_mul_extension(polx *c, const polx *a, const polx *b, size_t len, size_t deg, size_t mult);
-size_t polxvec_collaps_add_extension(polx *c, const polx *a, const polx *b, size_t len, size_t deg, size_t mult);
+void polxvec_sprod(polx *r, const polx *a, const polx *b, size_t len, int bound);
+void polxvec_sprod_add(polx *r, const polx *a, const polx *b, size_t len, int bound);
+size_t polxvec_mul_extension(polx *c, const polx *a, const polx *b, size_t len, size_t deg, size_t mult, int bound);
+size_t polxvec_collaps_add_extension(polx *c, const polx *a, const polx *b, size_t len, size_t deg, size_t mult,
+                                     int bound);
 
 void polx_scale(polx *r, const polx *a, int64_t s);
 void polx_scale_frompoly(polx *r, const poly *a, int64_t s);

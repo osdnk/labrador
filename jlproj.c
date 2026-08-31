@@ -228,6 +228,10 @@ void polyvec_jlproj_add(int32_t r[256], const poly *p, size_t len, const uint8_t
     poly_jlproj_add(r,&p[i],&mat[256*N/8*i]);
 }
 
+#ifndef JLPREFETCH
+#define JLPREFETCH 12
+#endif
+
 static void jlproj_collapsmat32(int64_t *row, const uint8_t *mat, size_t len, const int64_t alpha[32]) {
   size_t i;
   __m512i a,b,c,d;
@@ -375,27 +379,28 @@ static void jlproj_collapsmat32(int64_t *row, const uint8_t *mat, size_t len, co
   r = _mm512_permutexvar_epi64(revidx,r);  // -+++,-++-,-+-+,-+--,--++,--+-,---+,----
 #endif
 
-#define BLOCK(T0,T1)                      \
-  u = _mm512_permutex2var_epi64(T0,s,T1); \
-  v = _mm512_permutex2var_epi64(T0,t,T1); \
-  s = _mm512_srli_epi64(s,4);             \
-  t = _mm512_srli_epi64(t,4);             \
-  w = _mm512_add_epi64(w,u);              \
-  y = _mm512_add_epi64(y,v);              \
-  u = _mm512_permutex2var_epi64(T0,s,T1); \
-  v = _mm512_permutex2var_epi64(T0,t,T1); \
-  s = _mm512_srli_epi64(s,4);             \
-  t = _mm512_srli_epi64(t,4);             \
-  x = _mm512_add_epi64(x,u);              \
-  z = _mm512_add_epi64(z,v)
+/* The nibble is consumed before the index register is shifted on, so that the index --
+ * not one of the two table halves -- is the operand the permute may destroy: vpermi2q,
+ * which leaves both tables in place, rather than vpermt2q, which made the compiler copy a
+ * table register in front of every one of the lookups. And 16 outputs a tile, not 32: the
+ * 16 tables plus a 32-output accumulator did not fit in 32 zmm and a quarter of the inner
+ * loop was spill traffic. */
+#define BLOCK(T0,T1)                       \
+  u = s;                                   \
+  s = _mm512_srli_epi64(s,4);              \
+  w = _mm512_add_epi64(w,_mm512_permutex2var_epi64(T0,u,T1)); \
+  u = s;                                   \
+  s = _mm512_srli_epi64(s,4);              \
+  x = _mm512_add_epi64(x,_mm512_permutex2var_epi64(T0,u,T1))
 
-  for(i=0;i<len/32;i++) {
-    s = _mm512_load_si512((__m512i*)&mat[256*32/8*i+       0]);
-    t = _mm512_load_si512((__m512i*)&mat[256*32/8*i+256*16/8]);
-    w = _mm512_load_si512((__m512i*)&row[32*i+ 0]);
-    x = _mm512_load_si512((__m512i*)&row[32*i+ 8]);
-    y = _mm512_load_si512((__m512i*)&row[32*i+16]);
-    z = _mm512_load_si512((__m512i*)&row[32*i+24]);
+  for(i=0;i<len/16;i++) {
+    /* One 64-byte line per iteration, 512 bytes apart, and 54 instructions to hide the
+     * miss behind: the out-of-order window holds far too few of them to cover a DRAM
+     * round trip, so the line is asked for well ahead of the tile that needs it. */
+    _mm_prefetch((const char*)&mat[256*16/8*(i+JLPREFETCH)],_MM_HINT_T0);
+    s = _mm512_load_si512((__m512i*)&mat[256*16/8*i]);
+    w = _mm512_load_si512((__m512i*)&row[16*i+0]);
+    x = _mm512_load_si512((__m512i*)&row[16*i+8]);
     BLOCK(a,k);
     BLOCK(b,l);
     BLOCK(c,m);
@@ -404,10 +409,8 @@ static void jlproj_collapsmat32(int64_t *row, const uint8_t *mat, size_t len, co
     BLOCK(f,p);
     BLOCK(g,q);
     BLOCK(h,r);
-    _mm512_store_si512((__m512i*)&row[32*i+ 0],w);
-    _mm512_store_si512((__m512i*)&row[32*i+ 8],x);
-    _mm512_store_si512((__m512i*)&row[32*i+16],y);
-    _mm512_store_si512((__m512i*)&row[32*i+24],z);
+    _mm512_store_si512((__m512i*)&row[16*i+0],w);
+    _mm512_store_si512((__m512i*)&row[16*i+8],x);
   }
 
 #undef BLOCK
@@ -482,6 +485,11 @@ static void expand_challenge(int64_t alpha[256], const uint8_t buf[256*QBYTES]) 
 #endif
 }
 
+/* Output coefficients per sweep over the 256 challenges. The eight sweeps come back to the
+ * same slice of the matrix, so the slice wants to be in L1 when they do; a whole
+ * 16-polynomial chunk is 32 KB of matrix on top of the 8 KB accumulator, and was not. */
+#define JLTILE 256
+
 void polxvec_jlproj_collapsmat(polx *r, const uint8_t *mat, size_t len, const uint8_t buf[256*QBYTES]) {
   size_t i,j,k;
   __m512i f,g;
@@ -500,8 +508,9 @@ void polxvec_jlproj_collapsmat(polx *r, const uint8_t *mat, size_t len, const ui
   while(len >= 16) {
     for(i=0;i<16*N;i++)
       raw[i] = 0;
-    for(i=0;i<256/32;i++)
-      jlproj_collapsmat32(raw,&mat[32*16/8*i],16*N,&alpha[32*i]);
+    for(j=0;j<16*N;j+=JLTILE)
+      for(i=0;i<256/32;i++)
+        jlproj_collapsmat32(&raw[j],&mat[32*j+32*16/8*i],JLTILE,&alpha[32*i]);
 
     for(i=0;i<16;i++) {
       for(j=0;j<N/8;j++) {

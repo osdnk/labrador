@@ -159,15 +159,15 @@ int polcom_commit(polcomctx *ctx, const polz *s, size_t len) {
   for(i=0;i<n;i++) {
     /* inner commitments */
     polzvec_decompose_topolxvec(sx[i],&s[i*m],MIN(m,len-i*m),m,cpp->f,cpp->b);
-    polxvec_mul_extension(t,comkey,sx[i],m*cpp->f,cpp->kappa,1);
+    polxvec_mul_extension(t,comkey,sx[i],m*cpp->f,cpp->kappa,1,SPROD_WALK);
     polxvec_decompose(&ctx->t[i*cpp->kappa*cpp->fu],t,cpp->kappa,cpp->fu,cpp->bu);
 
     /* outer commitment */
     polxvec_frompolyvec(t,&ctx->t[i*cpp->kappa*cpp->fu],cpp->kappa*cpp->fu);
     if(i == 0)
-      j += polxvec_mul_extension(u,&comkey[j],t,cpp->kappa*cpp->fu,cpp->kappa1,1);
+      j += polxvec_mul_extension(u,&comkey[j],t,cpp->kappa*cpp->fu,cpp->kappa1,1,SPROD_WALK);
     else {
-      j += polxvec_mul_extension(t,&comkey[j],t,cpp->kappa*cpp->fu,cpp->kappa1,1);
+      j += polxvec_mul_extension(t,&comkey[j],t,cpp->kappa*cpp->fu,cpp->kappa1,1,SPROD_WALK);
       polxvec_add(u,u,t,cpp->kappa1);
     }
   }
@@ -344,7 +344,7 @@ void polcom_eval(witness *wt, polcomprf *pi, const polcomctx *ctx, int64_t x, in
   /* commit to w */
   polx *tmp = _aligned_alloc(64,MAX(MAX(wt->n[3],cpp->kappa1),n+m*cpp->f)*sizeof(polx));
   polxvec_frompolyvec(tmp,wt->s[3],wt->n[3]);
-  polxvec_mul_extension(tmp,comkey,tmp,wt->n[3],cpp->kappa1,1);
+  polxvec_mul_extension(tmp,comkey,tmp,wt->n[3],cpp->kappa1,1,SPROD_WALK);
   polzvec_frompolxvec(pi->u2,tmp,cpp->kappa1);
   polzvec_bitpack(&hashbuf[24],pi->u2,cpp->kappa1);
 
